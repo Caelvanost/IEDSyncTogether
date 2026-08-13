@@ -20,7 +20,6 @@ namespace IEDSyncTogether::StrServerDiscovery
         {
             std::filesystem::file_time_type modified{};
             std::uintmax_t order{ 0 };
-            std::string token;
             std::optional<std::string> value;
         };
 
@@ -139,7 +138,6 @@ namespace IEDSyncTogether::StrServerDiscovery
                     values.push_back(StoredValue{
                         ec ? std::filesystem::file_time_type{} : modified,
                         order++,
-                        fmt::format("{}:{}", entry.path().filename().string(), position),
                         TryReadChromiumLocalStorageValue(data, position + key.size()) });
                     position += key.size();
                 }
@@ -154,24 +152,14 @@ namespace IEDSyncTogether::StrServerDiscovery
             return values;
         }
 
-        std::optional<StoredValue> ReadLatestLocalStorageEntry(std::string_view key)
+        std::optional<std::string> ReadLatestLocalStorageValue(std::string_view key)
         {
             const auto values = ReadLocalStorageValues(key);
             if (values.empty()) {
                 return std::nullopt;
             }
 
-            return values.back();
-        }
-
-        std::optional<std::string> ReadLatestLocalStorageValue(std::string_view key)
-        {
-            const auto entry = ReadLatestLocalStorageEntry(key);
-            if (!entry) {
-                return std::nullopt;
-            }
-
-            return entry->value;
+            return values.back().value;
         }
 
         bool IsSafeHost(std::string_view host)
@@ -312,11 +300,9 @@ namespace IEDSyncTogether::StrServerDiscovery
     {
         ClientState state{};
 
-        if (const auto address = ReadLatestLocalStorageEntry("last_connected_address");
-            address && address->value) {
-            state.rawAddress = *address->value;
-            state.remotePeer = ParseStrAddress(*address->value, iedSyncPort);
-            state.connectionToken = address->token;
+        if (const auto address = ReadLatestLocalStorageValue("last_connected_address")) {
+            state.rawAddress = *address;
+            state.remotePeer = ParseStrAddress(*address, iedSyncPort);
         }
 
         if (const auto password = ReadLatestLocalStorageValue("last_connected_password");

@@ -10,7 +10,6 @@ namespace IEDSyncTogether::StrServerDiscovery
         std::optional<Config::RemotePeer> remotePeer;
         std::optional<std::string> password;
         std::string rawAddress;
-        std::string connectionToken;
     };
 
     ClientState ReadClientState(std::uint16_t iedSyncPort);

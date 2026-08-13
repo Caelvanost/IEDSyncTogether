@@ -295,18 +295,7 @@ namespace IEDSyncTogether
     std::vector<sockaddr_in> UdpTransport::SnapshotConfiguredPeers() const
     {
         std::scoped_lock lock(_configuredPeerMutex);
-        auto peers = _configuredPeers;
-        if (_strAutoPeer) {
-            const auto duplicate = std::ranges::any_of(
-                peers,
-                [&](const sockaddr_in& existing) {
-                    return SameEndpoint(existing, *_strAutoPeer);
-                });
-            if (!duplicate) {
-                peers.push_back(*_strAutoPeer);
-            }
-        }
-        return peers;
+        return _configuredPeers;
     }
 
     void UdpTransport::RefreshSkyrimTogetherAutoConfig(bool force)
@@ -349,25 +338,6 @@ namespace IEDSyncTogether
         }
 
         const auto state = StrServerDiscovery::ReadClientState(_config.autoRemotePort);
-
-        if (!_strConnectionBaselineInitialized) {
-            _strConnectionBaselineInitialized = true;
-            _strConnectionBaselineToken = state.connectionToken;
-            if (force && state.remotePeer) {
-                SKSE::log::info(
-                    "IEDSTNET STR previous connection ignored at startup address=\"{}\"",
-                    state.rawAddress);
-            }
-            return;
-        }
-
-        if (state.connectionToken.empty() ||
-            (state.connectionToken == _strConnectionBaselineToken &&
-             _strConfiguredConnectionToken.empty()) ||
-            state.connectionToken == _strConfiguredConnectionToken) {
-            return;
-        }
-
         if (!state.remotePeer) {
             if (force) {
                 SKSE::log::info(
@@ -375,10 +345,6 @@ namespace IEDSyncTogether
             }
             return;
         }
-
-        SKSE::log::info(
-            "IEDSTNET STR connection detected address=\"{}\"",
-            state.rawAddress);
 
         const auto resolved = ResolveRemotePeer(*state.remotePeer);
         if (!resolved) {
@@ -391,29 +357,26 @@ namespace IEDSyncTogether
         }
 
         const auto endpoint = AddressToString(*resolved);
-        std::optional<std::string> oldEndpoint;
-        bool changed = false;
+        bool inserted = false;
         {
             std::scoped_lock lock(_configuredPeerMutex);
-            if (_strAutoPeer) {
-                oldEndpoint = AddressToString(*_strAutoPeer);
-                changed = !SameEndpoint(*_strAutoPeer, *resolved);
-            } else {
-                changed = true;
+            const auto duplicate = std::ranges::any_of(
+                _configuredPeers,
+                [&](const sockaddr_in& existing) {
+                    return SameEndpoint(existing, *resolved);
+                });
+            if (!duplicate) {
+                _configuredPeers.push_back(*resolved);
+                inserted = true;
             }
-            _strAutoPeer = *resolved;
         }
-        _strConfiguredConnectionToken = state.connectionToken;
 
-        if (oldEndpoint && changed) {
+        if (inserted) {
             SKSE::log::info(
-                "IEDSTNET STR UDP peer changed old={} new={}",
-                *oldEndpoint,
+                "IEDSTNET STR auto remote configured address=\"{}\" endpoint={}",
+                state.rawAddress,
                 endpoint);
         }
-        SKSE::log::info(
-            "IEDSTNET STR UDP peer configured endpoint={}",
-            endpoint);
     }
 
     bool UdpTransport::SendPacketTo(
@@ -462,13 +425,6 @@ namespace IEDSyncTogether
             _sharedSecret = _config.sharedSecret;
         }
         _lastStrAutoConfigRefresh = {};
-        _strConnectionBaselineInitialized = false;
-        _strConnectionBaselineToken.clear();
-        _strConfiguredConnectionToken.clear();
-        {
-            std::scoped_lock lock(_configuredPeerMutex);
-            _strAutoPeer.reset();
-        }
 
         WSADATA wsa{};
         if (const auto result = WSAStartup(MAKEWORD(2, 2), &wsa); result != 0) {
@@ -618,11 +574,7 @@ namespace IEDSyncTogether
         {
             std::scoped_lock lock(_configuredPeerMutex);
             _configuredPeers.clear();
-            _strAutoPeer.reset();
         }
-        _strConnectionBaselineInitialized = false;
-        _strConnectionBaselineToken.clear();
-        _strConfiguredConnectionToken.clear();
         {
             std::scoped_lock lock(_authMutex);
             _sharedSecret.clear();

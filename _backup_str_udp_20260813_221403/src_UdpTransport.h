@@ -81,14 +81,10 @@ namespace IEDSyncTogether
         SOCKET _socket{ INVALID_SOCKET };
         sockaddr_in _broadcast{};
         std::vector<sockaddr_in> _configuredPeers;
-        std::optional<sockaddr_in> _strAutoPeer;
         mutable std::mutex _configuredPeerMutex;
         mutable std::mutex _authMutex;
         std::string _sharedSecret;
         std::chrono::steady_clock::time_point _lastStrAutoConfigRefresh{};
-        bool _strConnectionBaselineInitialized{ false };
-        std::string _strConnectionBaselineToken;
-        std::string _strConfiguredConnectionToken;
         std::string _instanceID;
 
         std::jthread _receiver;
