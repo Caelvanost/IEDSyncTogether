@@ -15,18 +15,19 @@ item in the remote inventory appear on the proxy.
 
 - Detect only Skyrim Together remote-player proxies.
 - Capture the 19 forms actually selected by IED on the owning client.
-- Exchange stable `plugin + local FormID` identities over LAN or Internet.
+- Exchange stable `plugin + local FormID` identities through the STR session.
 - Reproduce that authoritative selection on the matching remote proxy.
 - Never alter the real inventory or equipment managed by Skyrim Together.
 
 ## Status
 
-The v0.2 prototype now builds a Vortex/FOMOD package and provides:
+The v0.3 prototype now builds a Vortex/FOMOD package and provides:
 
 - Skyrim Together remote-proxy detection.
 - Asynchronous capture of all 19 IED equipment slots.
-- LAN peer discovery and UDP state exchange.
-- Internet direct peers, STR direct-connect auto-detection, and optional relay host mode.
+- STR Plugin Messaging transport on channel `chaos.ied_sync_together.slots.v1`.
+- Default networking with no IEDSyncTogether port forwarding.
+- Legacy UDP LAN/direct-peer/relay transport, kept as an opt-in compatibility path.
 - Optional shared-secret HMAC authentication.
 - Stable cross-client form identities (`plugin + local FormID`).
 - A versioned C ABI through which IED can request an authoritative slot.
@@ -38,6 +39,7 @@ It is built against:
 - SKSE 2.2.6
 - Immersive Equipment Displays 1.7.4
 - Skyrim Together Reborn
+- STRPluginMessagingAPI interface v2
 
 Released IED 1.7.4 has no public per-actor slot-override API. Full visual
 application therefore requires the small companion IED source patch documented
@@ -51,37 +53,36 @@ NPC display without touching equipped items or the real STR inventory.
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build-vortex.ps1
 ```
 
-The generated archive is `IEDSyncTogether-v0.2.0-FOMOD.zip`.
+The generated archive is `IEDSyncTogether-v0.3.0-STRPM-FOMOD.zip`.
 
-## Recommended Internet setup
+## Recommended remote setup
 
-On Player1 / the STR host:
+1. Install `STRPluginMessagingAPI.dll` with Skyrim Together Reborn.
+2. Install IEDSyncTogether and keep the FOMOD default:
+   `STR plugin messaging / no port forwarding`.
+3. Connect with Skyrim Together normally.
 
-1. Forward UDP port `38471` from the router to the host PC.
-2. Allow UDP `38471` through Windows Firewall.
-3. In the FOMOD, choose `Player1 host / Internet relay`.
+IEDSyncTogether dynamically loads `STRPluginMessagingAPI.dll`, registers the
+`chaos.ied_sync_together.slots.v1` channel, and sends the same compact slot
+payloads through the messaging plugin. It does not bind or expose its own
+Internet UDP port in the default profile.
 
-On each remote client:
-
-1. Install the default `Client / LAN / no Internet relay` profile.
-2. Connect to Player1 with STR direct connect as usual.
-3. No IEDSyncTogether INI edit is normally required.
-
-Clients reuse STR's saved direct-connect host automatically. If STR saved
-`82.65.51.103:10578`, IEDSyncTogether sends its UDP traffic to
-`82.65.51.103:38471`.
-
-Manual peers are still supported:
+The old direct UDP transport remains available for diagnostics:
 
 ```ini
 [Network]
+Transport=UDP
 RemotePeers=player-one.example:38471,203.0.113.8:38472
 SharedSecret=
 ```
 
-For stricter Internet play, set the same `SharedSecret=` on every client and
+`Transport=Auto` tries STR Plugin Messaging first, then falls back to UDP when
+STRPluginMessagingAPI is unavailable. `UdpFallback=1` enables the same fallback
+while keeping `Transport=STR`; the packaged default leaves it disabled.
+
+For stricter legacy UDP play, set the same `SharedSecret=` on every client and
 the relay host. `AutoSharedSecretFromSTR=1` can reuse STR's saved password when
-available, matching MorphSyncTogether's behavior.
+available, matching MorphSyncTogether's previous UDP behavior.
 
 ## License
 

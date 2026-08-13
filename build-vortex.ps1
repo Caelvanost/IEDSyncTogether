@@ -122,14 +122,20 @@ foreach ($RequiredPath in @($CoreIni, $RelayHostIni, $ModuleConfig, $Info)) {
 
 $CoreIniContent = Get-Content -LiteralPath $CoreIni -Raw
 $RelayHostIniContent = Get-Content -LiteralPath $RelayHostIni -Raw
+if ($CoreIniContent -notmatch '(?ms)^\[Network\].*?^Transport=STR\s*$') {
+    throw "Le profil FOMOD principal doit utiliser Transport=STR."
+}
+if ($CoreIniContent -notmatch '(?ms)^\[Network\].*?^UdpFallback=0\s*$') {
+    throw "Le profil FOMOD principal doit desactiver UdpFallback."
+}
 if ($CoreIniContent -notmatch '(?ms)^\[Network\].*?^RelayMode=0\s*$') {
     throw "Le profil FOMOD principal doit desactiver RelayMode."
 }
-if ($CoreIniContent -notmatch '(?ms)^\[Network\].*?^AutoRemoteFromSTR=1\s*$') {
-    throw "Le profil FOMOD principal doit activer AutoRemoteFromSTR."
+if ($RelayHostIniContent -notmatch '(?ms)^\[Network\].*?^Transport=UDP\s*$') {
+    throw "Le profil FOMOD UDP legacy doit utiliser Transport=UDP."
 }
 if ($RelayHostIniContent -notmatch '(?ms)^\[Network\].*?^RelayMode=1\s*$') {
-    throw "Le profil FOMOD relais host doit activer RelayMode."
+    throw "Le profil FOMOD UDP legacy doit activer RelayMode."
 }
 
 try {
@@ -148,7 +154,7 @@ if (Test-Path -LiteralPath $StageRoot) {
 }
 
 $CoreStage = Join-Path $StageRoot "00 Core"
-$RelayHostStage = Join-Path $StageRoot "20 Internet Relay Host"
+$RelayHostStage = Join-Path $StageRoot "20 Legacy UDP Relay Host"
 $FomodStage = Join-Path $StageRoot "fomod"
 New-Item -ItemType Directory -Force -Path $CoreStage, $RelayHostStage, $FomodStage | Out-Null
 
@@ -156,7 +162,7 @@ Copy-Item -Path (Join-Path $PackageRoot "*") -Destination $CoreStage -Recurse -F
 Copy-Item -Path (Join-Path $OptionalRelayHostPackage "*") -Destination $RelayHostStage -Recurse -Force
 Copy-Item -Path (Join-Path $FomodSource "*") -Destination $FomodStage -Recurse -Force
 
-$Archive = Join-Path $ProjectRoot "IEDSyncTogether-v0.2.0-FOMOD.zip"
+$Archive = Join-Path $ProjectRoot "IEDSyncTogether-v0.3.0-STRPM-FOMOD.zip"
 if (Test-Path -LiteralPath $Archive) {
     Remove-Item -LiteralPath $Archive -Force
 }
@@ -171,7 +177,7 @@ try {
         "00 Core/Data/IEDSyncTogether.esp",
         "00 Core/Data/SKSE/Plugins/IEDSyncTogether.dll",
         "00 Core/Data/SKSE/Plugins/IEDSyncTogether.ini",
-        "20 Internet Relay Host/Data/SKSE/Plugins/IEDSyncTogether_RelayHost.ini",
+        "20 Legacy UDP Relay Host/Data/SKSE/Plugins/IEDSyncTogether_RelayHost.ini",
         "fomod/ModuleConfig.xml",
         "fomod/info.xml"
     )

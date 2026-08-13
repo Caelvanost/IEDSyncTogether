@@ -2,6 +2,6 @@
 <fomod>
   <Name>IEDSyncTogether</Name>
   <Author>Caelvanost</Author>
-  <Version>0.2.0</Version>
-  <Description>Synchronizes Immersive Equipment Displays slot state between Skyrim Together players over LAN or Internet.</Description>
+  <Version>0.3.0</Version>
+  <Description>Synchronizes Immersive Equipment Displays slot state between Skyrim Together players through STR Plugin Messaging; no IEDSyncTogether port forwarding is needed by default.</Description>
 </fomod>

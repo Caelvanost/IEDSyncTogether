@@ -41,7 +41,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
     InitializeLogging();
     SKSE::Init(skse);
-    SKSE::log::info("IEDSyncTogether v0.2.0 loading");
+    SKSE::log::info("IEDSyncTogether v0.3.0 loading");
 
     auto* messaging = SKSE::GetMessagingInterface();
     if (!messaging) {

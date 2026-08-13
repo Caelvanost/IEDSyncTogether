@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
     IEDSyncTogether
-    VERSION 0.2.0
+    VERSION 0.3.0
     LANGUAGES CXX
 )
 
@@ -25,11 +25,14 @@ add_commonlibsse_plugin(${PROJECT_NAME}
         src/ProxyResolver.h
         src/StrServerDiscovery.cpp
         src/StrServerDiscovery.h
+        src/StrTransport.cpp
+        src/StrTransport.h
         src/UdpTransport.cpp
         src/UdpTransport.h
         src/SyncService.cpp
         src/SyncService.h
         include/IEDSyncTogether/Interface.h
+        include/STRPluginMessagingAPI/STRPluginMessagingAPI.h
 )
 
 target_precompile_headers(${PROJECT_NAME} PRIVATE src/PCH.h)

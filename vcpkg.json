@@ -1,6 +1,6 @@
 {
   "name": "ied-sync-together",
-  "version-string": "0.1.0",
+  "version-string": "0.3.0",
   "dependencies": [
     "commonlibsse-ng"
   ]

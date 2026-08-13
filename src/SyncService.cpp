@@ -4,6 +4,7 @@
 #include "IEDBridge.h"
 #include "IEDSyncTogether/Interface.h"
 #include "ProxyResolver.h"
+#include "StrTransport.h"
 #include "UdpTransport.h"
 
 namespace IEDSyncTogether
@@ -11,6 +12,20 @@ namespace IEDSyncTogether
     namespace
     {
         constexpr std::string_view kGameplayPrefix = "IEDST|v1|";
+
+        const char* TransportModeName(Config::TransportMode mode)
+        {
+            switch (mode) {
+            case Config::TransportMode::kSTR:
+                return "STR";
+            case Config::TransportMode::kAuto:
+                return "Auto";
+            case Config::TransportMode::kUDP:
+                return "UDP";
+            default:
+                return "Unknown";
+            }
+        }
     }
 
     SyncService& SyncService::GetSingleton()
@@ -63,23 +78,42 @@ namespace IEDSyncTogether
             return;
         }
 
-        if (_config.networkEnabled) {
-            UdpTransport::GetSingleton().Start(
-                _config,
-                [](std::string packet) {
-                    if (auto* tasks = SKSE::GetTaskInterface()) {
-                        tasks->AddTask([packet = std::move(packet)]() mutable {
-                            SyncService::GetSingleton().HandlePacket(std::move(packet));
-                        });
-                    }
+        const auto packetHandler = [](std::string packet) {
+            if (auto* tasks = SKSE::GetTaskInterface()) {
+                tasks->AddTask([packet = std::move(packet)]() mutable {
+                    SyncService::GetSingleton().HandlePacket(std::move(packet));
                 });
+            }
+        };
+
+        bool networkStarted = false;
+        if (_config.networkEnabled &&
+            _config.transportMode != Config::TransportMode::kUDP) {
+            networkStarted = StrTransport::GetSingleton().Start(_config, packetHandler);
+        }
+
+        const bool wantsUdp =
+            _config.transportMode == Config::TransportMode::kUDP ||
+            (_config.transportMode == Config::TransportMode::kAuto && !networkStarted) ||
+            (_config.udpFallback && !networkStarted);
+        if (_config.networkEnabled && wantsUdp) {
+            networkStarted = UdpTransport::GetSingleton().Start(_config, packetHandler);
+        }
+
+        if (_config.networkEnabled && !networkStarted) {
+            SKSE::log::warn(
+                "No network transport started for mode={} udpFallback={}",
+                TransportModeName(_config.transportMode),
+                _config.udpFallback ? 1 : 0);
         }
 
         _timer = std::jthread([this](std::stop_token token) { TimerLoop(token); });
         SKSE::log::info(
-            "Service started: capture={}ms suppressRemoteNpcDisplays={}",
+            "Service started: capture={}ms suppressRemoteNpcDisplays={} transport={} udpFallback={}",
             _config.captureIntervalMs,
-            _config.suppressRemoteNpcDisplays ? 1 : 0);
+            _config.suppressRemoteNpcDisplays ? 1 : 0,
+            TransportModeName(_config.transportMode),
+            _config.udpFallback ? 1 : 0);
     }
 
     void SyncService::Stop()
@@ -91,6 +125,7 @@ namespace IEDSyncTogether
             _timer.request_stop();
             _timer.join();
         }
+        StrTransport::GetSingleton().Stop();
         UdpTransport::GetSingleton().Stop();
     }
 
@@ -172,7 +207,7 @@ namespace IEDSyncTogether
             "STATE|rev={}|slots={}",
             _revision,
             EncodeSlots(_localSlots));
-        UdpTransport::GetSingleton().Send(payload);
+        SendNetworkPayload(payload);
         _lastSend = now;
 
         const auto visible = std::count_if(
@@ -184,6 +219,17 @@ namespace IEDSyncTogether
             _revision,
             visible,
             changed ? 1 : 0);
+    }
+
+    void SyncService::SendNetworkPayload(std::string_view payload)
+    {
+        if (StrTransport::GetSingleton().IsRunning()) {
+            StrTransport::GetSingleton().Send(payload);
+            return;
+        }
+        if (UdpTransport::GetSingleton().IsRunning()) {
+            UdpTransport::GetSingleton().Send(payload);
+        }
     }
 
     void SyncService::HandlePacket(std::string packet)

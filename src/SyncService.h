@@ -36,6 +36,7 @@ namespace IEDSyncTogether
         void TimerLoop(std::stop_token token);
         void Tick();
         void OnLocalCapture(SlotState slots);
+        void SendNetworkPayload(std::string_view payload);
         void RefreshProxyMitigation();
         void LogRemoteResolution(std::string_view sender, RemoteSnapshot& snapshot);
 

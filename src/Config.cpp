@@ -109,6 +109,22 @@ namespace IEDSyncTogether
             return value;
         }
 
+        Config::TransportMode ParseTransportMode(std::string value)
+        {
+            value = Trim(std::move(value));
+            std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+                return static_cast<char>(std::tolower(ch));
+            });
+
+            if (value == "auto") {
+                return Config::TransportMode::kAuto;
+            }
+            if (value == "udp" || value == "legacyudp") {
+                return Config::TransportMode::kUDP;
+            }
+            return Config::TransportMode::kSTR;
+        }
+
         std::optional<Config::RemotePeer> ParseRemotePeer(
             std::string value,
             std::uint16_t defaultPort)
@@ -196,6 +212,9 @@ namespace IEDSyncTogether
         config.networkEnabled =
             ReadBool(L"Network", L"Enabled", config.networkEnabled) &&
             !ReadBool(L"Network", L"Disabled", false);
+        config.transportMode = ParseTransportMode(
+            ReadString(L"Network", L"Transport", L"STR"));
+        config.udpFallback = ReadBool(L"Network", L"UdpFallback", config.udpFallback);
         config.autoDiscovery = ReadBool(L"Network", L"AutoDiscovery", config.autoDiscovery);
         config.relayMode = ReadBool(L"Network", L"RelayMode", config.relayMode);
         config.autoRemoteFromSTR = ReadBool(
@@ -253,6 +272,19 @@ namespace IEDSyncTogether
         config.sharedSecret = ReadString(L"Network", L"SharedSecret", L"");
 
         if (GetFileAttributesW(kRelayHostIniPath) != INVALID_FILE_ATTRIBUTES) {
+            const auto relayTransport = Trim(ReadString(
+                L"Network",
+                L"Transport",
+                L"",
+                kRelayHostIniPath));
+            if (!relayTransport.empty()) {
+                config.transportMode = ParseTransportMode(relayTransport);
+            }
+            config.udpFallback = ReadBool(
+                L"Network",
+                L"UdpFallback",
+                config.udpFallback,
+                kRelayHostIniPath);
             config.autoDiscovery = ReadBool(
                 L"Network",
                 L"AutoDiscovery",

@@ -6,6 +6,13 @@ namespace IEDSyncTogether
 {
     struct Config
     {
+        enum class TransportMode : std::uint32_t
+        {
+            kSTR = 0,
+            kAuto = 1,
+            kUDP = 2
+        };
+
         struct RemotePeer
         {
             std::string host;
@@ -13,6 +20,8 @@ namespace IEDSyncTogether
         };
 
         bool networkEnabled{ true };
+        TransportMode transportMode{ TransportMode::kSTR };
+        bool udpFallback{ false };
         bool autoDiscovery{ true };
         bool relayMode{ false };
         bool autoRemoteFromSTR{ true };
