@@ -1,0 +1,10 @@
+build/
+package/
+*.zip
+*.7z
+*.rar
+*.log
+.vs/
+.vscode/
+CMakeUserPresets.json
+
