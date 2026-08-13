@@ -21,18 +21,36 @@ item in the remote inventory appear on the proxy.
 
 ## Status
 
-Early prototype. The repository is being built and tested against:
+The v0.1 prototype now builds a Vortex package and provides:
+
+- Skyrim Together remote-proxy detection.
+- Asynchronous capture of all 19 IED equipment slots.
+- LAN peer discovery and UDP state exchange.
+- Stable cross-client form identities (`plugin + local FormID`).
+- A versioned C ABI through which IED can request an authoritative slot.
+- An opt-in fallback that hides IED-cloned gear on remote proxies.
+
+It is built against:
 
 - Skyrim Special Edition 1.6.1170
 - SKSE 2.2.6
 - Immersive Equipment Displays 1.7.4
 - Skyrim Together Reborn
 
-The first milestone is a safe diagnostic build that identifies proxies and
-captures IED slot state. Inventory suppression will only be enabled once it
-can be scoped to those proxies without affecting normal NPCs or equipped gear.
+Released IED 1.7.4 has no public per-actor slot-override API. Full visual
+application therefore requires the small companion IED source patch documented
+in [docs/IED-INTEGRATION.md](docs/IED-INTEGRATION.md). Without that integration,
+the DLL remains useful for diagnostics and can optionally suppress the incorrect
+NPC display without touching equipped items or the real STR inventory.
+
+## Build
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-vortex.ps1
+```
+
+The generated archive is `IEDSyncTogether-v0.1.0-Vortex.zip`.
 
 ## License
 
 MIT
-
