@@ -39,15 +39,17 @@ diagnostic mode; the INI fallback can hide all IED clones on remote proxies.
 
 ## STR messaging transport
 
-IEDSyncTogether v0.3 defaults to `Transport=STR`. It dynamically loads
+IEDSyncTogether v0.3.1 defaults to `Transport=STR`. It dynamically loads
 `STRPluginMessagingAPI.dll`, registers the channel
 `chaos.ied_sync_together.slots.v1`, and sends the authoritative IED slot state
 through the STR plugin-messaging layer.
 
 In that default profile, IEDSyncTogether does not bind an Internet UDP port and
-does not require router port forwarding. The previous UDP transport is still
-present as `Transport=UDP` or as an explicit fallback for diagnostics and older
-test setups.
+does not require router port forwarding. It also sets `RequireStrBridge=1`, so
+the STRPM transport is accepted only when `STR_QueryPluginMessagingDiagnostics`
+reports the `StrBridge` backend active. The previous IEDSyncTogether UDP
+transport is still present as `Transport=UDP` or as an explicit fallback for
+diagnostics and older test setups.
 
 ## Safety properties
 

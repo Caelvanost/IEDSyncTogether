@@ -128,11 +128,17 @@ if ($CoreIniContent -notmatch '(?ms)^\[Network\].*?^Transport=STR\s*$') {
 if ($CoreIniContent -notmatch '(?ms)^\[Network\].*?^UdpFallback=0\s*$') {
     throw "Le profil FOMOD principal doit desactiver UdpFallback."
 }
+if ($CoreIniContent -notmatch '(?ms)^\[Network\].*?^RequireStrBridge=1\s*$') {
+    throw "Le profil FOMOD principal doit exiger RequireStrBridge=1."
+}
 if ($CoreIniContent -notmatch '(?ms)^\[Network\].*?^RelayMode=0\s*$') {
     throw "Le profil FOMOD principal doit desactiver RelayMode."
 }
 if ($RelayHostIniContent -notmatch '(?ms)^\[Network\].*?^Transport=UDP\s*$') {
     throw "Le profil FOMOD UDP legacy doit utiliser Transport=UDP."
+}
+if ($RelayHostIniContent -notmatch '(?ms)^\[Network\].*?^RequireStrBridge=0\s*$') {
+    throw "Le profil FOMOD UDP legacy doit desactiver RequireStrBridge."
 }
 if ($RelayHostIniContent -notmatch '(?ms)^\[Network\].*?^RelayMode=1\s*$') {
     throw "Le profil FOMOD UDP legacy doit activer RelayMode."
@@ -162,7 +168,7 @@ Copy-Item -Path (Join-Path $PackageRoot "*") -Destination $CoreStage -Recurse -F
 Copy-Item -Path (Join-Path $OptionalRelayHostPackage "*") -Destination $RelayHostStage -Recurse -Force
 Copy-Item -Path (Join-Path $FomodSource "*") -Destination $FomodStage -Recurse -Force
 
-$Archive = Join-Path $ProjectRoot "IEDSyncTogether-v0.3.0-STRPM-FOMOD.zip"
+$Archive = Join-Path $ProjectRoot "IEDSyncTogether-v0.3.1-STRPM-FOMOD.zip"
 if (Test-Path -LiteralPath $Archive) {
     Remove-Item -LiteralPath $Archive -Force
 }

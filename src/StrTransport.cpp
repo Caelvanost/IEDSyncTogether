@@ -11,6 +11,34 @@ namespace IEDSyncTogether
     {
         constexpr char kChannel[] = "chaos.ied_sync_together.slots.v1";
 
+        const char* BackendName(STRPM::RuntimeBackend backend)
+        {
+            switch (backend) {
+            case STRPM::RuntimeBackend::kNone:
+                return "None";
+            case STRPM::RuntimeBackend::kUdp:
+                return "UDP";
+            case STRPM::RuntimeBackend::kStrBridge:
+                return "StrBridge";
+            default:
+                return "Unknown";
+            }
+        }
+
+        const char* BackendModeName(STRPM::RuntimeBackendMode mode)
+        {
+            switch (mode) {
+            case STRPM::RuntimeBackendMode::kAuto:
+                return "Auto";
+            case STRPM::RuntimeBackendMode::kUdp:
+                return "UDP";
+            case STRPM::RuntimeBackendMode::kStrBridge:
+                return "StrBridge";
+            default:
+                return "Unknown";
+            }
+        }
+
         std::string SanitizeField(std::string value)
         {
             for (auto& ch : value) {
@@ -83,6 +111,93 @@ namespace IEDSyncTogether
         }
 
         _api = api;
+        (void)LoadDiagnostics(module);
+        return true;
+    }
+
+    bool StrTransport::LoadDiagnostics(void* moduleHandle)
+    {
+        const auto module = static_cast<HMODULE>(moduleHandle);
+        _diagnostics = nullptr;
+        const auto rawQuery =
+            GetProcAddress(module, STRPM::kQueryDiagnosticsExportName);
+        if (!rawQuery) {
+            SKSE::log::warn("STRPM diagnostics unavailable: query export missing");
+            return false;
+        }
+
+        const auto query =
+            reinterpret_cast<STRPM::QueryDiagnosticsFn>(rawQuery);
+        const STRPM::DiagnosticsInterface* diagnostics = nullptr;
+        const auto result = query(STRPM::kDiagnosticsVersion, &diagnostics);
+        if (result != STRPM::Result::kOk ||
+            !diagnostics ||
+            diagnostics->version != STRPM::kDiagnosticsVersion ||
+            !diagnostics->getRuntimeStatus) {
+            SKSE::log::warn(
+                "STRPM diagnostics unavailable: query failed ({})",
+                STRPM::ResultToString(result));
+            return false;
+        }
+
+        _diagnostics = diagnostics;
+        return true;
+    }
+
+    std::optional<STRPM::RuntimeStatus> StrTransport::ReadRuntimeStatus() const
+    {
+        if (!_diagnostics || !_diagnostics->getRuntimeStatus) {
+            return std::nullopt;
+        }
+
+        STRPM::RuntimeStatus status{};
+        const auto result = _diagnostics->getRuntimeStatus(&status);
+        if (result != STRPM::Result::kOk || status.version != STRPM::kDiagnosticsVersion) {
+            SKSE::log::warn(
+                "STRPM diagnostics status unavailable: {} version={}",
+                STRPM::ResultToString(result),
+                status.version);
+            return std::nullopt;
+        }
+
+        return status;
+    }
+
+    bool StrTransport::ValidateRuntimeBackend() const
+    {
+        const auto status = ReadRuntimeStatus();
+        if (!status) {
+            if (_config.requireStrBridge) {
+                SKSE::log::warn(
+                    "STRPM transport rejected: RequireStrBridge=1 but diagnostics are unavailable");
+                return false;
+            }
+            return true;
+        }
+
+        SKSE::log::info(
+            "STRPM runtime status backend={} configured={} bridgeAvailable={} bridgeActive={} peers={} configuredPeers={}",
+            BackendName(status->activeBackend),
+            BackendModeName(status->configuredBackendMode),
+            status->strBridgeAvailable,
+            status->strBridgeActive,
+            status->knownPeerCount,
+            status->configuredPeerCount);
+
+        if (!_config.requireStrBridge) {
+            return true;
+        }
+
+        if (status->activeBackend != STRPM::RuntimeBackend::kStrBridge ||
+            status->strBridgeActive == 0) {
+            SKSE::log::warn(
+                "STRPM transport rejected: RequireStrBridge=1 but activeBackend={} bridgeAvailable={} bridgeActive={}",
+                BackendName(status->activeBackend),
+                status->strBridgeAvailable,
+                status->strBridgeActive);
+            return false;
+        }
+
         return true;
     }
 
@@ -115,6 +230,12 @@ namespace IEDSyncTogether
         _config = config;
         _handler = std::move(handler);
         if (!LoadApi()) {
+            _handler = {};
+            return false;
+        }
+        if (!ValidateRuntimeBackend()) {
+            _api = nullptr;
+            _diagnostics = nullptr;
             _handler = {};
             return false;
         }
@@ -177,6 +298,7 @@ namespace IEDSyncTogether
         _listener = {};
         _localConnectionID = 0;
         _localInstanceID.clear();
+        _diagnostics = nullptr;
         _api = nullptr;
         _handler = {};
         SKSE::log::info("STRPM transport stopped");
@@ -222,6 +344,9 @@ namespace IEDSyncTogether
             SKSE::log::warn(
                 "STRPM send failed: {}",
                 STRPM::ResultToString(result));
+            if (result == STRPM::Result::kNotConnected) {
+                (void)ValidateRuntimeBackend();
+            }
         }
     }
 

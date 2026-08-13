@@ -215,6 +215,8 @@ namespace IEDSyncTogether
         config.transportMode = ParseTransportMode(
             ReadString(L"Network", L"Transport", L"STR"));
         config.udpFallback = ReadBool(L"Network", L"UdpFallback", config.udpFallback);
+        config.requireStrBridge =
+            ReadBool(L"Network", L"RequireStrBridge", config.requireStrBridge);
         config.autoDiscovery = ReadBool(L"Network", L"AutoDiscovery", config.autoDiscovery);
         config.relayMode = ReadBool(L"Network", L"RelayMode", config.relayMode);
         config.autoRemoteFromSTR = ReadBool(
@@ -284,6 +286,11 @@ namespace IEDSyncTogether
                 L"Network",
                 L"UdpFallback",
                 config.udpFallback,
+                kRelayHostIniPath);
+            config.requireStrBridge = ReadBool(
+                L"Network",
+                L"RequireStrBridge",
+                config.requireStrBridge,
                 kRelayHostIniPath);
             config.autoDiscovery = ReadBool(
                 L"Network",

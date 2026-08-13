@@ -22,6 +22,7 @@ namespace IEDSyncTogether
         bool networkEnabled{ true };
         TransportMode transportMode{ TransportMode::kSTR };
         bool udpFallback{ false };
+        bool requireStrBridge{ true };
         bool autoDiscovery{ true };
         bool relayMode{ false };
         bool autoRemoteFromSTR{ true };

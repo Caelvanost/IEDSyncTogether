@@ -36,6 +36,9 @@ namespace IEDSyncTogether
             void* userData);
 
         [[nodiscard]] bool LoadApi();
+        [[nodiscard]] bool LoadDiagnostics(void* moduleHandle);
+        [[nodiscard]] bool ValidateRuntimeBackend() const;
+        [[nodiscard]] std::optional<STRPM::RuntimeStatus> ReadRuntimeStatus() const;
         [[nodiscard]] std::string BuildPacket(std::string_view payload) const;
         [[nodiscard]] static std::optional<std::string> ReadField(
             std::string_view packet,
@@ -44,6 +47,7 @@ namespace IEDSyncTogether
         Config _config{};
         PacketHandler _handler;
         const STRPM::Interface* _api{ nullptr };
+        const STRPM::DiagnosticsInterface* _diagnostics{ nullptr };
         STRPM::ListenerHandle _listener{};
         STRPM::ConnectionID _localConnectionID{ 0 };
         std::string _localInstanceID;

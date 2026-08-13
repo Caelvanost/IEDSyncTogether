@@ -21,12 +21,13 @@ item in the remote inventory appear on the proxy.
 
 ## Status
 
-The v0.3 prototype now builds a Vortex/FOMOD package and provides:
+The v0.3.1 prototype now builds a Vortex/FOMOD package and provides:
 
 - Skyrim Together remote-proxy detection.
 - Asynchronous capture of all 19 IED equipment slots.
 - STR Plugin Messaging transport on channel `chaos.ied_sync_together.slots.v1`.
 - Default networking with no IEDSyncTogether port forwarding.
+- STRPM diagnostics guard: the default profile requires the `StrBridge` backend.
 - Legacy UDP LAN/direct-peer/relay transport, kept as an opt-in compatibility path.
 - Optional shared-secret HMAC authentication.
 - Stable cross-client form identities (`plugin + local FormID`).
@@ -39,7 +40,7 @@ It is built against:
 - SKSE 2.2.6
 - Immersive Equipment Displays 1.7.4
 - Skyrim Together Reborn
-- STRPluginMessagingAPI interface v2
+- STRPluginMessagingAPI interface v2 + diagnostics v2
 
 Released IED 1.7.4 has no public per-actor slot-override API. Full visual
 application therefore requires the small companion IED source patch documented
@@ -53,7 +54,7 @@ NPC display without touching equipped items or the real STR inventory.
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build-vortex.ps1
 ```
 
-The generated archive is `IEDSyncTogether-v0.3.0-STRPM-FOMOD.zip`.
+The generated archive is `IEDSyncTogether-v0.3.1-STRPM-FOMOD.zip`.
 
 ## Recommended remote setup
 
@@ -67,18 +68,25 @@ IEDSyncTogether dynamically loads `STRPluginMessagingAPI.dll`, registers the
 payloads through the messaging plugin. It does not bind or expose its own
 Internet UDP port in the default profile.
 
+The default INI also sets `RequireStrBridge=1`. That means IEDSyncTogether
+queries `STR_QueryPluginMessagingDiagnostics` and refuses the STRPM transport
+unless STRPM reports `activeBackend=StrBridge`. This prevents an older or dev
+STRPM UDP backend from silently becoming the "no port forwarding" path.
+
 The old direct UDP transport remains available for diagnostics:
 
 ```ini
 [Network]
 Transport=UDP
+RequireStrBridge=0
 RemotePeers=player-one.example:38471,203.0.113.8:38472
 SharedSecret=
 ```
 
 `Transport=Auto` tries STR Plugin Messaging first, then falls back to UDP when
-STRPluginMessagingAPI is unavailable. `UdpFallback=1` enables the same fallback
-while keeping `Transport=STR`; the packaged default leaves it disabled.
+STRPluginMessagingAPI is unavailable or rejected by `RequireStrBridge=1`.
+`UdpFallback=1` enables the same fallback while keeping `Transport=STR`; the
+packaged default leaves it disabled.
 
 For stricter legacy UDP play, set the same `SharedSecret=` on every client and
 the relay host. `AutoSharedSecretFromSTR=1` can reuse STR's saved password when
