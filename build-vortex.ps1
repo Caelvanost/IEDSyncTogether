@@ -10,6 +10,9 @@ $BuildRoot = Join-Path $ProjectRoot "build"
 $PackageRoot = Join-Path $ProjectRoot "package"
 $PluginRoot = Join-Path $PackageRoot "Data\SKSE\Plugins"
 $ConfigSource = Join-Path $ProjectRoot "config\IEDSyncTogether.ini"
+$OptionalRelayHostPackage = Join-Path $ProjectRoot "optional\RelayHost\package"
+$FomodSource = Join-Path $ProjectRoot "fomod"
+$StageRoot = [System.IO.Path]::GetFullPath((Join-Path $BuildRoot "fomod-stage"))
 
 if (-not $VcpkgRoot) {
     $VcpkgRoot = "C:\dev\vcpkg"
@@ -106,10 +109,79 @@ Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $PluginRoot "IEDSyn
 Copy-Item -LiteralPath $ConfigSource -Destination (Join-Path $PluginRoot "IEDSyncTogether.ini") -Force
 Write-MinimalPlugin (Join-Path $PackageRoot "Data\IEDSyncTogether.esp")
 
-$Archive = Join-Path $ProjectRoot "IEDSyncTogether-v0.1.0-Vortex.zip"
+$CoreIni = Join-Path $PluginRoot "IEDSyncTogether.ini"
+$RelayHostIni = Join-Path $OptionalRelayHostPackage "Data\SKSE\Plugins\IEDSyncTogether_RelayHost.ini"
+$ModuleConfig = Join-Path $FomodSource "ModuleConfig.xml"
+$Info = Join-Path $FomodSource "info.xml"
+
+foreach ($RequiredPath in @($CoreIni, $RelayHostIni, $ModuleConfig, $Info)) {
+    if (-not (Test-Path -LiteralPath $RequiredPath)) {
+        throw "Fichier FOMOD requis introuvable: $RequiredPath"
+    }
+}
+
+$CoreIniContent = Get-Content -LiteralPath $CoreIni -Raw
+$RelayHostIniContent = Get-Content -LiteralPath $RelayHostIni -Raw
+if ($CoreIniContent -notmatch '(?ms)^\[Network\].*?^RelayMode=0\s*$') {
+    throw "Le profil FOMOD principal doit desactiver RelayMode."
+}
+if ($CoreIniContent -notmatch '(?ms)^\[Network\].*?^AutoRemoteFromSTR=1\s*$') {
+    throw "Le profil FOMOD principal doit activer AutoRemoteFromSTR."
+}
+if ($RelayHostIniContent -notmatch '(?ms)^\[Network\].*?^RelayMode=1\s*$') {
+    throw "Le profil FOMOD relais host doit activer RelayMode."
+}
+
+try {
+    [void][xml](Get-Content -LiteralPath $ModuleConfig -Raw)
+    [void][xml](Get-Content -LiteralPath $Info -Raw)
+} catch {
+    throw "Metadonnees FOMOD XML invalides: $($_.Exception.Message)"
+}
+
+$BuildRootFull = [System.IO.Path]::GetFullPath($BuildRoot).TrimEnd('\')
+if (-not $StageRoot.StartsWith("$BuildRootFull\", [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Le repertoire temporaire FOMOD est hors du repertoire de build: $StageRoot"
+}
+if (Test-Path -LiteralPath $StageRoot) {
+    Remove-Item -LiteralPath $StageRoot -Recurse -Force
+}
+
+$CoreStage = Join-Path $StageRoot "00 Core"
+$RelayHostStage = Join-Path $StageRoot "20 Internet Relay Host"
+$FomodStage = Join-Path $StageRoot "fomod"
+New-Item -ItemType Directory -Force -Path $CoreStage, $RelayHostStage, $FomodStage | Out-Null
+
+Copy-Item -Path (Join-Path $PackageRoot "*") -Destination $CoreStage -Recurse -Force
+Copy-Item -Path (Join-Path $OptionalRelayHostPackage "*") -Destination $RelayHostStage -Recurse -Force
+Copy-Item -Path (Join-Path $FomodSource "*") -Destination $FomodStage -Recurse -Force
+
+$Archive = Join-Path $ProjectRoot "IEDSyncTogether-v0.2.0-FOMOD.zip"
 if (Test-Path -LiteralPath $Archive) {
     Remove-Item -LiteralPath $Archive -Force
 }
-Compress-Archive -Path (Join-Path $PackageRoot "*") -DestinationPath $Archive -Force
 
-Write-Host "Package Vortex cree: $Archive" -ForegroundColor Green
+Compress-Archive -Path (Join-Path $StageRoot "*") -DestinationPath $Archive -Force
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$Zip = [System.IO.Compression.ZipFile]::OpenRead($Archive)
+try {
+    $Entries = @($Zip.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
+    $RequiredEntries = @(
+        "00 Core/Data/IEDSyncTogether.esp",
+        "00 Core/Data/SKSE/Plugins/IEDSyncTogether.dll",
+        "00 Core/Data/SKSE/Plugins/IEDSyncTogether.ini",
+        "20 Internet Relay Host/Data/SKSE/Plugins/IEDSyncTogether_RelayHost.ini",
+        "fomod/ModuleConfig.xml",
+        "fomod/info.xml"
+    )
+    foreach ($RequiredEntry in $RequiredEntries) {
+        if ($Entries -notcontains $RequiredEntry) {
+            throw "Entree FOMOD absente de l'archive: $RequiredEntry"
+        }
+    }
+} finally {
+    $Zip.Dispose()
+}
+
+Write-Host "Package FOMOD cree: $Archive" -ForegroundColor Green
