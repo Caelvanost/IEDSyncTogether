@@ -25,7 +25,7 @@ The v0.3.1 prototype now builds a Vortex/FOMOD package and provides:
 
 - Skyrim Together remote-proxy detection.
 - Asynchronous capture of all 19 IED equipment slots.
-- STR Plugin Messaging transport on channel `chaos.ied_sync_together.slots.v1`.
+- STR Plugin Messaging transport on channel `strpm.iedsynctogether.slots.v1`.
 - Default networking with no IEDSyncTogether port forwarding.
 - STRPM diagnostics guard: the default profile requires the `StrBridge` backend.
 - Legacy UDP LAN/direct-peer/relay transport, kept as an opt-in compatibility path.
@@ -64,7 +64,7 @@ The generated archive is `IEDSyncTogether-v0.3.1-STRPM-FOMOD.zip`.
 3. Connect with Skyrim Together normally.
 
 IEDSyncTogether dynamically loads `STRPluginMessagingAPI.dll`, registers the
-`chaos.ied_sync_together.slots.v1` channel, and sends the same compact slot
+`strpm.iedsynctogether.slots.v1` channel, and sends the same compact slot
 payloads through the messaging plugin. It does not bind or expose its own
 Internet UDP port in the default profile.
 
