@@ -1,6 +1,7 @@
 /build/
 /package/
 /dist/
+/_backup_str_udp_*/
 *.zip
 *.7z
 *.rar
