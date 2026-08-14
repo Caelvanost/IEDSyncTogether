@@ -8,3 +8,4 @@ package/
 .vscode/
 CMakeUserPresets.json
 
+dist/
