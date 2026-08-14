@@ -168,7 +168,10 @@ Copy-Item -Path (Join-Path $PackageRoot "*") -Destination $CoreStage -Recurse -F
 Copy-Item -Path (Join-Path $OptionalRelayHostPackage "*") -Destination $RelayHostStage -Recurse -Force
 Copy-Item -Path (Join-Path $FomodSource "*") -Destination $FomodStage -Recurse -Force
 
-$Archive = Join-Path $ProjectRoot "IEDSyncTogether-v0.3.1-STRPM-FOMOD.zip"
+$DistRoot = Join-Path $ProjectRoot "dist"
+New-Item -ItemType Directory -Force -Path $DistRoot | Out-Null
+
+$Archive = Join-Path $DistRoot "IEDSyncTogether-v0.2.0-FOMOD.zip"
 if (Test-Path -LiteralPath $Archive) {
     Remove-Item -LiteralPath $Archive -Force
 }
