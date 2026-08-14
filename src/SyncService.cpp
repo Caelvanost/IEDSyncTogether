@@ -168,8 +168,10 @@ namespace IEDSyncTogether
             ++_revision;
         }
 
+        const auto& transport = UdpTransport::GetSingleton();
         const auto payload = fmt::format(
-            "STATE|rev={}|slots={}",
+            "STATE|from={}|rev={}|slots={}",
+            HexEncode(transport.GetLocalPlayerName()),
             _revision,
             EncodeSlots(_localSlots));
         UdpTransport::GetSingleton().Send(payload);
@@ -249,7 +251,7 @@ namespace IEDSyncTogether
         }
 
         SKSE::log::info(
-            "Remote IED state matched: player=\"{}\" proxy={:08X} revision={} slots={}/{} adapter=slot-override-export",
+            "Remote IED state matched: player=\"{}\" proxy={:08X} revision={} slots={}/{} adapter=diagnostic",
             sender,
             proxy->GetFormID(),
             snapshot.revision,

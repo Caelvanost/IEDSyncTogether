@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
     IEDSyncTogether
-    VERSION 0.2.0
+    VERSION 0.1.0
     LANGUAGES CXX
 )
 
@@ -23,8 +23,6 @@ add_commonlibsse_plugin(${PROJECT_NAME}
         src/IEDBridge.h
         src/ProxyResolver.cpp
         src/ProxyResolver.h
-        src/StrServerDiscovery.cpp
-        src/StrServerDiscovery.h
         src/UdpTransport.cpp
         src/UdpTransport.h
         src/SyncService.cpp
@@ -45,4 +43,4 @@ target_compile_definitions(${PROJECT_NAME}
         IEDST_BUILD
 )
 
-target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32 bcrypt)
+target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32)

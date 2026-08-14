@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<fomod>
-  <Name>IEDSyncTogether</Name>
-  <Author>Caelvanost</Author>
-  <Version>0.2.0</Version>
-  <Description>Synchronizes Immersive Equipment Displays slot state between Skyrim Together players over LAN or Internet.</Description>
-</fomod>
