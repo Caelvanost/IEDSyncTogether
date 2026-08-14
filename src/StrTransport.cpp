@@ -9,7 +9,7 @@ namespace IEDSyncTogether
 {
     namespace
     {
-        constexpr char kChannel[] = "chaos.ied_sync_together.slots.v1";
+        constexpr char kChannel[] = "strpm.iedsynctogether.slots.v1";
 
         const char* BackendName(STRPM::RuntimeBackend backend)
         {
@@ -70,11 +70,6 @@ namespace IEDSyncTogether
             }
         }
 
-        std::array<char, MAX_COMPUTERNAME_LENGTH + 1> computerName{};
-        DWORD length = static_cast<DWORD>(computerName.size());
-        if (GetComputerNameA(computerName.data(), &length) && length > 0) {
-            return SanitizeField(std::string(computerName.data(), length));
-        }
         return "Player";
     }
 
