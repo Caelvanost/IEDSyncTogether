@@ -37,6 +37,14 @@ review. A production release should use a build of IED containing this patch,
 or an upstream equivalent. Without it, the synchronization DLL operates in
 diagnostic mode; the INI fallback can hide all IED clones on remote proxies.
 
+## Internet mode
+
+IEDSyncTogether uses its own UDP port, `38471`, so it can run alongside
+MorphSyncTogether. The default client profile keeps LAN discovery enabled and
+also reads STR's saved direct-connect address from Chromium localStorage. The
+optional relay-host FOMOD profile enables `RelayMode=1` on Player1 and forwards
+client packets to other active peers.
+
 ## Safety properties
 
 - No item is added, removed, equipped or unequipped.
