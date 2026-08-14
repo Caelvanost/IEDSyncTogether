@@ -106,7 +106,10 @@ Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $PluginRoot "IEDSyn
 Copy-Item -LiteralPath $ConfigSource -Destination (Join-Path $PluginRoot "IEDSyncTogether.ini") -Force
 Write-MinimalPlugin (Join-Path $PackageRoot "Data\IEDSyncTogether.esp")
 
-$Archive = Join-Path $ProjectRoot "IEDSyncTogether-v0.1.0-Vortex.zip"
+$DistRoot = Join-Path $ProjectRoot "dist"
+New-Item -ItemType Directory -Force -Path $DistRoot | Out-Null
+
+$Archive = Join-Path $DistRoot "IEDSyncTogether-v0.1.0-FOMOD.zip"
 if (Test-Path -LiteralPath $Archive) {
     Remove-Item -LiteralPath $Archive -Force
 }
