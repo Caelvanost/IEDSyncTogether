@@ -38,13 +38,16 @@ namespace
             break;
 
         case SKSE::MessagingInterface::kPreLoadGame:
-            service.SetGameReady(false);
+            service.SetGameLoaded(false);
             service.Reset();
             break;
 
         case SKSE::MessagingInterface::kPostLoadGame:
         case SKSE::MessagingInterface::kNewGame:
-            service.SetGameReady(true);
+            // A loaded save does not mean Skyrim Together is connected. Keep the
+            // synchronization service dormant until a remote STR player proxy is
+            // actually present in the game world.
+            service.SetGameLoaded(true);
             break;
 
         default:
