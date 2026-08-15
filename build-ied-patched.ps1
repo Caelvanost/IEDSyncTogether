@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PatchPath = Join-Path $ProjectRoot "integration\ied-dev\ied-sync-together.patch"
+$BridgeHeaderSource = Join-Path $ProjectRoot "integration\ied-dev\IEDSyncTogetherBridge.h"
 $OutputRoot = Join-Path $ProjectRoot "build\ied-patched"
 $OutputDll = Join-Path $OutputRoot "ImmersiveEquipmentDisplays.dll"
 
@@ -44,8 +45,10 @@ function Resolve-MSBuild {
     throw "MSBuild introuvable. Installe le workload C++ de Visual Studio ou passe -MsBuild <chemin>."
 }
 
-if (-not (Test-Path -LiteralPath $PatchPath -PathType Leaf)) {
-    throw "Patch IEDSyncTogether introuvable: $PatchPath"
+foreach ($required in @($PatchPath, $BridgeHeaderSource)) {
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+        throw "Fichier d'integration IEDSyncTogether introuvable: $required"
+    }
 }
 
 if (-not $IedSourceRoot) {
@@ -110,6 +113,9 @@ try {
 
     Push-Location $WorktreeRoot
     try {
+        $bridgeHeaderDestination = Join-Path $WorktreeRoot "ImmersiveEquipmentDisplays\IED\Controller\IEDSyncTogetherBridge.h"
+        Copy-Item -LiteralPath $BridgeHeaderSource -Destination $bridgeHeaderDestination -Force
+
         & $git.Source apply --check $PatchPath
         if ($LASTEXITCODE -ne 0) {
             throw "Le patch IEDSyncTogether ne s'applique pas proprement au commit IED 1.7.4."
