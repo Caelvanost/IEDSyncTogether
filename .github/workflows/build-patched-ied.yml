@@ -7,6 +7,7 @@ on:
       - main
     paths:
       - .github/workflows/build-patched-ied.yml
+      - .github/scripts/prepare-ied-imgui.ps1
       - integration/ied-dev/**
 
 permissions:
@@ -51,6 +52,13 @@ jobs:
           "IED_WORKSPACE=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
           "IED_SOURCE_ROOT=$(Join-Path $root 'ied-dev')" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      - name: Recreate historical IED ImGui build project
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & "$env:GITHUB_WORKSPACE\.github\scripts\prepare-ied-imgui.ps1" `
+            -ImguiRoot (Join-Path $env:IED_WORKSPACE 'imgui')
+
       - name: Prepare exact SKSE 2.0.17 source used by sse-build-resources
         shell: pwsh
         run: |
@@ -82,10 +90,6 @@ jobs:
           Copy-Item -LiteralPath (Join-Path $mirror 'src\common') -Destination (Join-Path $skseRoot 'common') -Recurse -Force
           Copy-Item -LiteralPath (Join-Path $mirror 'src\skse64') -Destination (Join-Path $skseRoot 'skse64') -Recurse -Force
 
-          # The HDT mirror carries a later local edit to NiGeometry.h despite
-          # retaining the exact SKSE 2.0.17 version header. Replace only that
-          # file with clayne's pristine 1.5.97-era copy, which is the input
-          # expected by clayne/sse-build-resources' historical patch.
           $niGeometry = Join-Path $skseRoot 'skse64\skse64\NiGeometry.h'
           $niGeometryUrl = "https://raw.githubusercontent.com/clayne/sse_character_export/$env:NIGEOMETRY_COMPAT_COMMIT/src/skse64/skse64/NiGeometry.h"
           Invoke-WebRequest -UseBasicParsing -Uri $niGeometryUrl -OutFile $niGeometry
@@ -122,18 +126,11 @@ jobs:
               Remove-Item -LiteralPath $reject.FullName -Force
             }
 
-            # IED links the sibling sse-build-resources.vcxproj, which compiles
-            # SKSE sources directly; the rejected original SKSE project files
-            # are not referenced by the IED solution.
             $remainingRejects = @(Get-ChildItem -Path $skseRoot -Recurse -Filter '*.rej' -File)
             if ($remainingRejects.Count -ne 0) {
               throw 'Unexpected patch reject remains after compatibility handling.'
             }
 
-            # git apply returns 1 whenever any hunk was rejected, even when the
-            # only rejected files are the explicitly ignored original SKSE
-            # project files above. Reset the native exit code after validating
-            # that no source-code rejection remains.
             $global:LASTEXITCODE = 0
           } finally {
             Pop-Location
