@@ -14,6 +14,8 @@ namespace IEDSyncTogether
         void Start();
         void Stop();
         void Reset();
+        void SetGameReady(bool ready) noexcept;
+        [[nodiscard]] bool CanApplyRuntimeOverrides() const;
         void HandlePacket(std::string packet);
         std::uint32_t QueryRemoteSlot(
             RE::FormID actorFormID,
@@ -47,6 +49,7 @@ namespace IEDSyncTogether
         Config _config{};
         std::jthread _timer;
         std::atomic_bool _running{ false };
+        std::atomic_bool _gameReady{ false };
         std::atomic_bool _capturePending{ false };
         SlotState _localSlots{};
         bool _hasLocalSlots{ false };
