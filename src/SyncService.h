@@ -37,6 +37,7 @@ namespace IEDSyncTogether
 
         void TimerLoop(std::stop_token token);
         void Tick();
+        void OnProxyScanComplete(std::vector<RE::FormID> remoteProxyIDs);
         void OnLocalCapture(SlotState slots);
         void UpdateSTRSessionState(const std::vector<RE::Actor*>& proxies);
         void SuspendSTRSession();
@@ -54,6 +55,7 @@ namespace IEDSyncTogether
         std::atomic_bool _gameLoaded{ false };
         std::atomic_bool _strConnected{ false };
         std::atomic_bool _remotePlayersAvailable{ false };
+        std::atomic_bool _proxyScanPending{ false };
         std::atomic_bool _capturePending{ false };
         SlotState _localSlots{};
         bool _hasLocalSlots{ false };
