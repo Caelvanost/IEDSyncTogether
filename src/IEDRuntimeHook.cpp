@@ -13,7 +13,6 @@ namespace IEDSyncTogether
     {
         constexpr std::uintptr_t kSelectSlotItemCallRva = 0xE3806;
         constexpr std::uintptr_t kSelectSlotItemRva = 0x146360;
-        constexpr std::ptrdiff_t kProcessParamsActorOffset = 0x38;
         constexpr std::ptrdiff_t kObjectEntrySlotIdOffset = 0x24;
 
         // CommonLib searches a +/-2 GiB window around the address passed to
@@ -48,6 +47,17 @@ namespace IEDSyncTogether
         };
         static_assert(sizeof(RelativeCall) == 0x5);
 #pragma pack(pop)
+
+        // IED 1.7.4 ProcessParams inherits ProcessParamsData first, and the
+        // first member of ProcessParamsData is Game::ObjectRefHandle. Both the
+        // historical IED handle and Skyrim's native reference handle are a
+        // single 32-bit value. Resolve that stable handle instead of reading a
+        // guessed Actor* offset from IED's private multiple-inheritance layout.
+        struct ObjectRefHandleABI
+        {
+            std::uint32_t value;
+        };
+        static_assert(sizeof(ObjectRefHandleABI) == sizeof(std::uint32_t));
 
         struct ItemDataABI
         {
@@ -85,6 +95,10 @@ namespace IEDSyncTogether
             SlotItemCandidatesABI* candidates,
             const void* objectEntrySlot) noexcept;
 
+        using LookupActorHandleFn = bool (*)(
+            const ObjectRefHandleABI& handle,
+            RE::NiPointer<RE::Actor>& out);
+
         SelectSlotItemFn g_originalSelectSlotItem{ nullptr };
         SKSE::Trampoline g_iedTrampoline{ "IEDSyncTogether.IED" };
         bool g_installed{ false };
@@ -115,6 +129,30 @@ namespace IEDSyncTogether
             return true;
         }
 
+        bool ResolveProcessParamsActor(
+            const void* processParams,
+            RE::NiPointer<RE::Actor>& out) noexcept
+        {
+            out = nullptr;
+            if (!processParams) {
+                return false;
+            }
+
+            ObjectRefHandleABI handle{};
+            std::memcpy(&handle, processParams, sizeof(handle));
+            if (handle.value == 0) {
+                return false;
+            }
+
+            // Same engine lookup used by CommonLibSSE-NG's
+            // BSPointerHandleManagerInterface<T>::GetSmartPointer().
+            static REL::Relocation<LookupActorHandleFn> lookup{
+                RELOCATION_ID(12204, 12332)
+            };
+
+            return lookup(handle, out) && out != nullptr;
+        }
+
         SelectedItemABI* MakeEmpty(SelectedItemABI* result) noexcept
         {
             if (result) {
@@ -142,8 +180,8 @@ namespace IEDSyncTogether
             }
 
             // Save loading and the pre-network state must be indistinguishable
-            // from stock IED. This also prevents us from reading private IED
-            // structure offsets until an actual remote snapshot exists.
+            // from stock IED. Do not inspect any IED-private data until an
+            // actual remote snapshot exists.
             auto& service = SyncService::GetSingleton();
             if (!service.CanApplyRuntimeOverrides()) {
                 return g_originalSelectSlotItem(
@@ -154,12 +192,8 @@ namespace IEDSyncTogether
                     objectEntrySlot);
             }
 
-            // Verified against the official IED 1.7.4 binary:
-            // ProcessParams::CommonParams::actor is read at +0x38 in ProcessSlots.
-            const auto paramsBytes = static_cast<const std::byte*>(processParams);
-            auto* actor = *reinterpret_cast<RE::Actor* const*>(
-                paramsBytes + kProcessParamsActorOffset);
-            if (!actor) {
+            RE::NiPointer<RE::Actor> actor;
+            if (!ResolveProcessParamsActor(processParams, actor)) {
                 return g_originalSelectSlotItem(
                     result,
                     processParams,
