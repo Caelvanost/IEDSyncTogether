@@ -10,6 +10,14 @@ $BuildRoot = Join-Path $ProjectRoot "build"
 $PackageRoot = Join-Path $ProjectRoot "package"
 $PluginRoot = Join-Path $PackageRoot "Data\SKSE\Plugins"
 $ConfigSource = Join-Path $ProjectRoot "config\IEDSyncTogether.ini"
+$CMakeLists = Join-Path $ProjectRoot "CMakeLists.txt"
+
+$CMakeText = Get-Content -LiteralPath $CMakeLists -Raw
+$VersionMatch = [regex]::Match($CMakeText, 'VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)')
+if (-not $VersionMatch.Success) {
+    throw "Impossible de determiner la version du projet depuis CMakeLists.txt"
+}
+$ProjectVersion = $VersionMatch.Groups[1].Value
 
 if (-not $VcpkgRoot) {
     $VcpkgRoot = "C:\dev\vcpkg"
@@ -113,7 +121,7 @@ Write-MinimalPlugin (Join-Path $PackageRoot "Data\IEDSyncTogether.esp")
 $DistRoot = Join-Path $ProjectRoot "dist"
 New-Item -ItemType Directory -Force -Path $DistRoot | Out-Null
 
-$Archive = Join-Path $DistRoot "IEDSyncTogether-v0.1.0.zip"
+$Archive = Join-Path $DistRoot "IEDSyncTogether-v$ProjectVersion.zip"
 if (Test-Path -LiteralPath $Archive) {
     Remove-Item -LiteralPath $Archive -Force
 }
