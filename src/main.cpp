@@ -25,6 +25,8 @@ namespace
     void OnSKSEMessage(SKSE::MessagingInterface::Message* message)
     {
         using namespace IEDSyncTogether;
+        auto& service = SyncService::GetSingleton();
+
         switch (message->type) {
         case SKSE::MessagingInterface::kDataLoaded:
             if (!IEDRuntimeHook::Install()) {
@@ -32,11 +34,19 @@ namespace
                     "IEDSyncTogether disabled: supported IED 1.7.4 runtime hook could not be installed");
                 break;
             }
-            SyncService::GetSingleton().Start();
+            service.Start();
             break;
+
         case SKSE::MessagingInterface::kPreLoadGame:
-            SyncService::GetSingleton().Reset();
+            service.SetGameReady(false);
+            service.Reset();
             break;
+
+        case SKSE::MessagingInterface::kPostLoadGame:
+        case SKSE::MessagingInterface::kNewGame:
+            service.SetGameReady(true);
+            break;
+
         default:
             break;
         }
@@ -47,7 +57,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
     InitializeLogging();
     SKSE::Init(skse);
-    SKSE::log::info("IEDSyncTogether v0.1.0 loading");
+    SKSE::log::info("IEDSyncTogether v{} loading", IEDST_VERSION_STRING);
 
     auto* messaging = SKSE::GetMessagingInterface();
     if (!messaging) {
