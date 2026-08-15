@@ -1,6 +1,7 @@
 #include "PCH.h"
 
 #include "IEDSyncTogether/Interface.h"
+#include "IEDRuntimeHook.h"
 #include "SyncService.h"
 
 namespace
@@ -26,6 +27,11 @@ namespace
         using namespace IEDSyncTogether;
         switch (message->type) {
         case SKSE::MessagingInterface::kDataLoaded:
+            if (!IEDRuntimeHook::Install()) {
+                SKSE::log::critical(
+                    "IEDSyncTogether disabled: supported IED 1.7.4 runtime hook could not be installed");
+                break;
+            }
             SyncService::GetSingleton().Start();
             break;
         case SKSE::MessagingInterface::kPreLoadGame:
