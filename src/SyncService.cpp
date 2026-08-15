@@ -11,6 +11,7 @@ namespace IEDSyncTogether
     namespace
     {
         constexpr std::string_view kGameplayPrefix = "IEDST|v1|";
+        std::atomic_bool g_loggedFirstActiveTick{ false };
     }
 
     SyncService& SyncService::GetSingleton()
@@ -57,6 +58,7 @@ namespace IEDSyncTogether
         }
 
         _gameReady.store(false);
+        g_loggedFirstActiveTick.store(false);
         _config = Config::Load();
         if (!IEDBridge::GetSingleton().IsInstalled()) {
             SKSE::log::critical("Immersive Equipment Displays is not loaded");
@@ -101,6 +103,7 @@ namespace IEDSyncTogether
         // Reset is called while Skyrim is tearing down the old save. Do not
         // invoke IED/Papyrus on actors that may already be in destruction.
         _gameReady.store(false);
+        g_loggedFirstActiveTick.store(false);
         _blockedProxies.clear();
         {
             std::scoped_lock lock(_snapshotMutex);
@@ -115,6 +118,7 @@ namespace IEDSyncTogether
         _gameReady.store(ready);
         if (!ready) {
             _capturePending.store(false);
+            g_loggedFirstActiveTick.store(false);
         }
         SKSE::log::info("Game state {} for IED synchronization", ready ? "ready" : "suspended");
     }
@@ -131,7 +135,15 @@ namespace IEDSyncTogether
 
     void SyncService::TimerLoop(std::stop_token token)
     {
+        // Never enqueue game-thread work while a save is loading. The task queue
+        // can stop draining during loading; continuously adding Tick tasks would
+        // otherwise create a burst immediately after PostLoadGame.
         while (!token.stop_requested() && _running.load()) {
+            if (!_gameReady.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+
             if (auto* tasks = SKSE::GetTaskInterface()) {
                 tasks->AddTask([]() { SyncService::GetSingleton().Tick(); });
             }
@@ -152,11 +164,41 @@ namespace IEDSyncTogether
             return;
         }
 
-        RefreshProxyMitigation();
+        const bool firstActiveTick = !g_loggedFirstActiveTick.exchange(true);
+        if (firstActiveTick) {
+            SKSE::log::info("First active synchronization tick started");
+        }
+
+        bool hasRemoteSnapshots = false;
+        {
+            std::scoped_lock lock(_snapshotMutex);
+            hasRemoteSnapshots = !_remoteSnapshots.empty();
+        }
+
+        // Proxy discovery is unnecessary before we either have remote state to
+        // match or explicitly need to suppress IED displays on STR proxies.
+        if (_config.suppressRemoteNpcDisplays || hasRemoteSnapshots || !_blockedProxies.empty()) {
+            if (firstActiveTick) {
+                SKSE::log::debug("First active tick: refreshing STR proxy state");
+            }
+            RefreshProxyMitigation();
+            if (firstActiveTick) {
+                SKSE::log::debug("First active tick: STR proxy refresh complete");
+            }
+        } else if (firstActiveTick) {
+            SKSE::log::debug("First active tick: STR proxy refresh skipped (no remote state)");
+        }
 
         bool expected = false;
         if (!_capturePending.compare_exchange_strong(expected, true)) {
+            if (firstActiveTick) {
+                SKSE::log::debug("First active tick: capture already pending");
+            }
             return;
+        }
+
+        if (firstActiveTick) {
+            SKSE::log::info("First active tick: starting local IED slot capture");
         }
 
         const bool requested = IEDBridge::GetSingleton().CapturePlayerSlots(
@@ -167,6 +209,13 @@ namespace IEDSyncTogether
                 }
                 OnLocalCapture(std::move(slots));
             });
+
+        if (firstActiveTick) {
+            SKSE::log::info(
+                "First active tick: local IED capture dispatch returned requested={}",
+                requested ? 1 : 0);
+        }
+
         if (!requested) {
             _capturePending.store(false);
         }
