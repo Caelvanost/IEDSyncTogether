@@ -59,6 +59,8 @@ namespace IEDSyncTogether
         _gameLoaded.store(false);
         _strConnected.store(false);
         _remotePlayersAvailable.store(false);
+        _proxyScanPending.store(false);
+        _capturePending.store(false);
         _config = Config::Load();
         if (!IEDBridge::GetSingleton().IsInstalled()) {
             SKSE::log::critical("Immersive Equipment Displays is not loaded");
@@ -80,7 +82,7 @@ namespace IEDSyncTogether
 
         _timer = std::jthread([this](std::stop_token token) { TimerLoop(token); });
         SKSE::log::info(
-            "Service started dormant: waiting for loaded save and STR remote-player proxy; capture={}ms suppressRemoteNpcDisplays={}",
+            "Service started dormant: STR remote players will be validated through SkyrimTogetherUtils.IsRemotePlayer; capture={}ms suppressRemoteNpcDisplays={}",
             _config.captureIntervalMs,
             _config.suppressRemoteNpcDisplays ? 1 : 0);
     }
@@ -101,8 +103,6 @@ namespace IEDSyncTogether
 
     void SyncService::Reset()
     {
-        // Reset is called while Skyrim is tearing down the old save. Do not
-        // invoke IED/Papyrus on actors that may already be in destruction.
         _gameLoaded.store(false);
         SuspendSTRSession();
     }
@@ -116,16 +116,17 @@ namespace IEDSyncTogether
             return;
         }
 
-        // PostLoadGame/NewGame only tells us that Skyrim is ready. STR still
-        // requires a manual connection, so no IED capture starts here.
-        SKSE::log::info("Game loaded; waiting for a remote Skyrim Together player before enabling IED synchronization");
+        SKSE::log::info(
+            "Game loaded; waiting for an STR-verified remote player before enabling IED synchronization");
     }
 
     void SyncService::SuspendSTRSession()
     {
         _strConnected.store(false);
         _remotePlayersAvailable.store(false);
+        _proxyScanPending.store(false);
         _capturePending.store(false);
+        ClearRemotePlayerProxyCache();
         _blockedProxies.clear();
         {
             std::scoped_lock lock(_snapshotMutex);
@@ -151,10 +152,11 @@ namespace IEDSyncTogether
             _hasLocalSlots = false;
             _lastSend = {};
             SKSE::log::info(
-                "STR session detected: {} remote player proxy/proxies; enabling IED synchronization",
+                "STR session verified: {} remote player proxy/proxies confirmed by SkyrimTogetherUtils.IsRemotePlayer; enabling IED synchronization",
                 proxies.size());
         } else {
-            SKSE::log::info("STR remote player proxies disappeared; suspending IED synchronization");
+            SKSE::log::info(
+                "No STR-verified remote players remain; suspending IED synchronization");
             SuspendSTRSession();
         }
     }
@@ -174,9 +176,6 @@ namespace IEDSyncTogether
 
     void SyncService::TimerLoop(std::stop_token token)
     {
-        // A loaded save is only the point at which it is safe to inspect the
-        // actor lists. Tick itself decides whether an STR session exists. No
-        // Papyrus/IED capture occurs until a remote STR proxy is present.
         while (!token.stop_requested() && _running.load()) {
             if (!_gameLoaded.load()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -203,10 +202,39 @@ namespace IEDSyncTogether
             return;
         }
 
-        // STR is connected manually after the save loads. A remote-player proxy
-        // is the activation signal relevant to this mod: without one there is
-        // nothing for IEDSyncTogether to synchronize or override.
-        const auto proxies = FindRemotePlayerProxies();
+        bool expected = false;
+        if (!_proxyScanPending.compare_exchange_strong(expected, true)) {
+            return;
+        }
+
+        // The 0xFFxxxxxx check in ProxyResolver is now only a cheap candidate
+        // filter. STR itself authoritatively classifies each candidate through
+        // SkyrimTogetherUtils.IsRemotePlayer before this service can activate.
+        const bool requested = RequestRemotePlayerProxyScan(
+            [this](std::vector<RE::FormID> remoteProxyIDs) {
+                OnProxyScanComplete(std::move(remoteProxyIDs));
+            });
+
+        if (!requested) {
+            _proxyScanPending.store(false);
+        }
+    }
+
+    void SyncService::OnProxyScanComplete(std::vector<RE::FormID> remoteProxyIDs)
+    {
+        _proxyScanPending.store(false);
+        if (!_running.load() || !_gameLoaded.load()) {
+            return;
+        }
+
+        auto proxies = FindRemotePlayerProxies();
+        if (proxies.size() != remoteProxyIDs.size()) {
+            SKSE::log::debug(
+                "STR proxy validation resolved {}/{} verified actor(s) still present",
+                proxies.size(),
+                remoteProxyIDs.size());
+        }
+
         UpdateSTRSessionState(proxies);
         if (!_strConnected.load() || !_remotePlayersAvailable.load()) {
             return;
@@ -327,7 +355,7 @@ namespace IEDSyncTogether
         auto* proxy = FindRemotePlayerProxy(sender);
         if (!proxy) {
             SKSE::log::info(
-                "Remote IED state waiting for proxy: player=\"{}\" revision={}",
+                "Remote IED state waiting for verified proxy: player=\"{}\" revision={}",
                 sender,
                 snapshot.revision);
             return;
@@ -347,7 +375,7 @@ namespace IEDSyncTogether
         }
 
         SKSE::log::info(
-            "Remote IED state matched: player=\"{}\" proxy={:08X} revision={} slots={}/{} adapter=diagnostic",
+            "Remote IED state matched: player=\"{}\" proxy={:08X} revision={} slots={}/{} adapter=str-verified",
             sender,
             proxy->GetFormID(),
             snapshot.revision,
@@ -369,7 +397,7 @@ namespace IEDSyncTogether
                 IEDBridge::GetSingleton().SetActorBlocked(proxy, true);
                 const auto* proxyName = proxy->GetName();
                 SKSE::log::info(
-                    "Suppressed IED NPC display on proxy {:08X} \"{}\"",
+                    "Suppressed IED NPC display on verified STR proxy {:08X} \"{}\"",
                     proxy->GetFormID(),
                     proxyName ? proxyName : "");
             }
@@ -419,7 +447,7 @@ namespace IEDSyncTogether
 
         auto* form = RE::TESForm::LookupByID(actorFormID);
         auto* actor = form ? form->As<RE::Actor>() : nullptr;
-        if (!IsLikelyRemotePlayerProxy(actor)) {
+        if (!IsVerifiedRemotePlayerProxy(actor)) {
             return static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kNotRemote);
         }
 
