@@ -12,11 +12,15 @@ namespace IEDSyncTogether
     {
         constexpr std::string_view kPapyrusClass = "IED";
         constexpr std::string_view kPluginKey = "IEDSyncTogether.esp";
+        std::atomic_bool g_firstCaptureStarted{ false };
 
         struct CaptureRequest
         {
-            explicit CaptureRequest(IEDBridge::CaptureCallback value) :
-                callback(std::move(value))
+            CaptureRequest(
+                IEDBridge::CaptureCallback value,
+                bool diagnosticValue) :
+                callback(std::move(value)),
+                diagnostic(diagnosticValue)
             {}
 
             void Complete(std::size_t slot, RE::FormID formID)
@@ -31,6 +35,14 @@ namespace IEDSyncTogether
                     }
                     completed[slot] = true;
 
+                    if (diagnostic) {
+                        SKSE::log::debug(
+                            "First IED capture: completing slot={} form={:08X} remainingBefore={}",
+                            slot,
+                            formID,
+                            remaining);
+                    }
+
                     if (formID != 0) {
                         slots[slot] = MakeFormIdentity(RE::TESForm::LookupByID(formID));
                     }
@@ -42,6 +54,9 @@ namespace IEDSyncTogether
                 }
 
                 if (finalCallback) {
+                    if (diagnostic) {
+                        SKSE::log::info("First IED capture: all 19 slot callbacks completed");
+                    }
                     finalCallback(std::move(finalSlots));
                 }
             }
@@ -51,6 +66,7 @@ namespace IEDSyncTogether
             std::array<bool, 19> completed{};
             std::size_t remaining{ 19 };
             IEDBridge::CaptureCallback callback;
+            bool diagnostic{ false };
         };
 
         class SlotResultCallback final :
@@ -66,11 +82,22 @@ namespace IEDSyncTogether
 
             void operator()(RE::BSScript::Variable result) override
             {
+                if (_request->diagnostic) {
+                    SKSE::log::debug("First IED capture: callback entered slot={}", _slot);
+                }
+
                 RE::FormID formID = 0;
                 if (result.IsObject() && !result.IsNoneObject()) {
                     if (auto* form = result.Unpack<RE::TESForm*>()) {
                         formID = form->GetFormID();
                     }
+                }
+
+                if (_request->diagnostic) {
+                    SKSE::log::debug(
+                        "First IED capture: callback decoded slot={} form={:08X}",
+                        _slot,
+                        formID);
                 }
 
                 auto request = _request;
@@ -122,10 +149,24 @@ namespace IEDSyncTogether
             return false;
         }
 
-        auto request = std::make_shared<CaptureRequest>(std::move(callback));
+        const bool diagnostic = !g_firstCaptureStarted.exchange(true);
+        if (diagnostic) {
+            SKSE::log::info(
+                "First IED capture: dispatching 19 GetSlottedForm calls player={:08X}",
+                player->GetFormID());
+        }
+
+        auto request = std::make_shared<CaptureRequest>(
+            std::move(callback),
+            diagnostic);
+
         for (std::size_t slot = 0; slot < request->slots.size(); ++slot) {
             RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> result(
                 new SlotResultCallback(request, slot));
+
+            if (diagnostic) {
+                SKSE::log::debug("First IED capture: dispatch begin slot={}", slot);
+            }
 
             const bool dispatched = vm->DispatchStaticCall(
                 RE::BSFixedString(kPapyrusClass.data()),
@@ -135,9 +176,20 @@ namespace IEDSyncTogether
                     static_cast<std::int32_t>(slot)),
                 result);
 
+            if (diagnostic) {
+                SKSE::log::debug(
+                    "First IED capture: dispatch end slot={} dispatched={}",
+                    slot,
+                    dispatched ? 1 : 0);
+            }
+
             if (!dispatched) {
                 request->Complete(slot, 0);
             }
+        }
+
+        if (diagnostic) {
+            SKSE::log::info("First IED capture: all 19 calls dispatched");
         }
         return true;
     }
