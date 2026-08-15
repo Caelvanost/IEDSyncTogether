@@ -24,18 +24,53 @@ The ABI is declared in `include/IEDSyncTogether/Interface.h`. It is intentionall
 C-only at the DLL boundary, so the two plugins do not share C++ objects or
 allocator ownership.
 
-## Applying to ied-dev
+## Building the patched IED DLL
 
-From an `ied-dev` checkout:
+The helper `build-ied-patched.ps1` targets the official IED 1.7.4 source commit:
 
-```powershell
-git apply C:\Users\chaos\Documents\Mods\IEDSyncTogether\integration\ied-dev\ied-sync-together.patch
+```text
+3f014c3e8574ef0e88b2ec0b7cdf58b86c9737b0
 ```
 
+It creates a temporary detached Git worktree, applies the patch, builds the
+`Release MT Post 629 143|x64` configuration, copies the resulting
+`ImmersiveEquipmentDisplays.dll` into `build/ied-patched/`, then removes the
+temporary worktree. The original `ied-dev` checkout is not modified.
+
+Example:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-ied-patched.ps1 `
+  -IedSourceRoot "C:\path\to\ied-dev"
+```
+
+IED 1.7.4 expects its historical build dependencies beside the `ied-dev`
+checkout, including `sse-build-resources`, `imgui`, `assimp`, and its vcpkg
+configuration.
+
 The standalone `IEDSyncTogetherBridge.h` next to the patch is also provided for
-review. A production release should use a build of IED containing this patch,
-or an upstream equivalent. Without it, the synchronization DLL operates in
-diagnostic mode; the INI fallback can hide all IED clones on remote proxies.
+review.
+
+## Vortex packaging
+
+`build-vortex.ps1` now requires a patched IED DLL. If none has already been
+produced in `build/ied-patched/`, it invokes `build-ied-patched.ps1`
+automatically.
+
+The generated archive contains:
+
+```text
+Data/SKSE/Plugins/IEDSyncTogether.dll
+Data/SKSE/Plugins/IEDSyncTogether.ini
+Data/SKSE/Plugins/ImmersiveEquipmentDisplays.dll
+Data/IEDSyncTogether.esp
+Data/IEDSyncTogether/licenses/IED-LICENSE.txt
+```
+
+The patched `ImmersiveEquipmentDisplays.dll` intentionally overrides the DLL
+from the normal IED installation. In Vortex, IEDSyncTogether must win that file
+conflict. All other IED assets and configuration continue to come from the
+original IED mod.
 
 ## Safety properties
 
