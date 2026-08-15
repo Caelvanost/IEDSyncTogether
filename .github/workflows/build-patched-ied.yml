@@ -129,6 +129,12 @@ jobs:
             if ($remainingRejects.Count -ne 0) {
               throw 'Unexpected patch reject remains after compatibility handling.'
             }
+
+            # git apply returns 1 whenever any hunk was rejected, even when the
+            # only rejected files are the explicitly ignored original SKSE
+            # project files above. Reset the native exit code after validating
+            # that no source-code rejection remains.
+            $global:LASTEXITCODE = 0
           } finally {
             Pop-Location
           }
