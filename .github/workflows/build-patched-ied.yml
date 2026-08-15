@@ -127,7 +127,7 @@ jobs:
           set(VCPKG_LIBRARY_LINKAGE static)
           '@ | Set-Content -LiteralPath $tripletPath -Encoding ASCII
 
-          & (Join-Path $vcpkg 'vcpkg.exe') install `
+          & (Join-Path $vcpkg 'vcpkg.exe') install --classic `
             "directxtk:$env:VCPKG_TRIPLET" `
             "jsoncpp:$env:VCPKG_TRIPLET" `
             "boost-locale:$env:VCPKG_TRIPLET" `
@@ -201,5 +201,3 @@ jobs:
           }
           git commit -m 'Update prebuilt patched IED 1.7.4 DLL'
           git push origin HEAD:main
-
-# Validation is performed through a merged PR so the main-branch push event is emitted by GitHub.
