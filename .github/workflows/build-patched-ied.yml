@@ -18,8 +18,7 @@ jobs:
 
     env:
       IED_COMMIT: 3f014c3e8574ef0e88b2ec0b7cdf58b86c9737b0
-      SKSE_COMMIT: 2540ea5e21bd066a53218154b03d938da73624aa
-      COMMON_COMMIT: 75009ab40ad350bef48351db374125304ec83141
+      SKSE_MIRROR_COMMIT: 420507be00ad9a5c42c212a0956e4dedaecf0009
       IED_CONFIGURATION: Release MT Post 629 143
       VCPKG_TRIPLET: x64-windows-rel-static-143
 
@@ -51,36 +50,39 @@ jobs:
           "IED_WORKSPACE=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
           "IED_SOURCE_ROOT=$(Join-Path $root 'ied-dev')" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Prepare patched SKSE source used by sse-build-resources
+      - name: Prepare exact SKSE 2.0.17 source used by sse-build-resources
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $sse = Join-Path $env:IED_WORKSPACE 'sse-build-resources'
           $skseRoot = Join-Path $sse 'skse64'
-          $skseCheckout = Join-Path $env:RUNNER_TEMP 'skse64-github'
-          $commonCheckout = Join-Path $env:RUNNER_TEMP 'skse-common-github'
+          $mirror = Join-Path $env:RUNNER_TEMP 'skse-2.0.17-mirror'
 
-          foreach ($path in @($skseRoot, $skseCheckout, $commonCheckout)) {
+          foreach ($path in @($skseRoot, $mirror)) {
             if (Test-Path $path) { Remove-Item $path -Recurse -Force }
           }
 
-          # GitHub mirrors maintained by the SKSE author. The earliest public
-          # skse64 commit is 2.0.19 / runtime 1.5.97 and is used only as the
-          # pristine source tree onto which sse-build-resources applies its
-          # version-independent patch.
-          git clone https://github.com/ianpatt/skse64.git $skseCheckout
-          git -C $skseCheckout checkout $env:SKSE_COMMIT
-          git clone https://github.com/ianpatt/common.git $commonCheckout
-          git -C $commonCheckout checkout $env:COMMON_COMMIT
+          # This repository contains an exact source snapshot of SKSE 2.0.17.
+          # Sparse checkout keeps the CI input limited to the two directories
+          # present in the original SKSE source archive's src/ folder.
+          git clone --filter=blob:none --no-checkout https://github.com/HydrogensaysHDT/hdt-skyrimse-mods.git $mirror
+          git -C $mirror sparse-checkout init --cone
+          git -C $mirror sparse-checkout set src/common src/skse64
+          git -C $mirror checkout $env:SKSE_MIRROR_COMMIT
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to checkout pinned SKSE 2.0.17 mirror.' }
+
+          $versionHeader = Join-Path $mirror 'src\skse64\skse64_common\skse_version.h'
+          if (-not (Test-Path -LiteralPath $versionHeader -PathType Leaf)) {
+            throw 'SKSE 2.0.17 version header is missing from the mirror.'
+          }
+          $versionText = Get-Content -LiteralPath $versionHeader -Raw
+          if ($versionText -notmatch 'CURRENT_RELEASE_SKSE_STR\s+"2\.0\.17"') {
+            throw 'Pinned mirror is not SKSE 2.0.17.'
+          }
 
           New-Item -ItemType Directory -Force -Path $skseRoot | Out-Null
-          Get-ChildItem -LiteralPath $skseCheckout -Force |
-            Where-Object { $_.Name -ne '.git' } |
-            Copy-Item -Destination $skseRoot -Recurse -Force
-          New-Item -ItemType Directory -Force -Path (Join-Path $skseRoot 'common') | Out-Null
-          Get-ChildItem -LiteralPath $commonCheckout -Force |
-            Where-Object { $_.Name -ne '.git' } |
-            Copy-Item -Destination (Join-Path $skseRoot 'common') -Recurse -Force
+          Copy-Item -LiteralPath (Join-Path $mirror 'src\common') -Destination (Join-Path $skseRoot 'common') -Recurse -Force
+          Copy-Item -LiteralPath (Join-Path $mirror 'src\skse64') -Destination (Join-Path $skseRoot 'skse64') -Recurse -Force
 
           Expand-Archive -LiteralPath (Join-Path $sse 'skse64-patch.zip') -DestinationPath $skseRoot -Force
 
@@ -92,11 +94,13 @@ jobs:
             git add -A
             git commit -m baseline
 
-            $patch = Get-ChildItem -Path $skseRoot -Filter 'skse64.patch' -Recurse | Select-Object -First 1
-            if (-not $patch) { throw 'sse-build-resources skse64.patch not found.' }
-            git apply --check $patch.FullName
-            if ($LASTEXITCODE -ne 0) { throw 'sse-build-resources patch does not apply to pinned GitHub SKSE source.' }
-            git apply $patch.FullName
+            $patch = Join-Path $skseRoot 'skse64.patch'
+            if (-not (Test-Path -LiteralPath $patch -PathType Leaf)) {
+              throw 'sse-build-resources skse64.patch not found.'
+            }
+            git apply --check $patch
+            if ($LASTEXITCODE -ne 0) { throw 'sse-build-resources patch does not apply to the exact SKSE 2.0.17 snapshot.' }
+            git apply $patch
             if ($LASTEXITCODE -ne 0) { throw 'Failed to apply sse-build-resources SKSE patch.' }
           } finally {
             Pop-Location
