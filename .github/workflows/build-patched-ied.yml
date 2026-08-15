@@ -19,6 +19,7 @@ jobs:
     env:
       IED_COMMIT: 3f014c3e8574ef0e88b2ec0b7cdf58b86c9737b0
       SKSE_MIRROR_COMMIT: 420507be00ad9a5c42c212a0956e4dedaecf0009
+      NIGEOMETRY_COMPAT_COMMIT: 04b5a650f4392f5cb03f1fcd9146938307f221a7
       IED_CONFIGURATION: Release MT Post 629 143
       VCPKG_TRIPLET: x64-windows-rel-static-143
 
@@ -80,6 +81,15 @@ jobs:
           New-Item -ItemType Directory -Force -Path $skseRoot | Out-Null
           Copy-Item -LiteralPath (Join-Path $mirror 'src\common') -Destination (Join-Path $skseRoot 'common') -Recurse -Force
           Copy-Item -LiteralPath (Join-Path $mirror 'src\skse64') -Destination (Join-Path $skseRoot 'skse64') -Recurse -Force
+
+          # The HDT mirror carries a later local edit to NiGeometry.h despite
+          # retaining the exact SKSE 2.0.17 version header. Replace only that
+          # file with clayne's pristine 1.5.97-era copy, which is the input
+          # expected by clayne/sse-build-resources' historical patch.
+          $niGeometry = Join-Path $skseRoot 'skse64\skse64\NiGeometry.h'
+          $niGeometryUrl = "https://raw.githubusercontent.com/clayne/sse_character_export/$env:NIGEOMETRY_COMPAT_COMMIT/src/skse64/skse64/NiGeometry.h"
+          Invoke-WebRequest -UseBasicParsing -Uri $niGeometryUrl -OutFile $niGeometry
+
           Expand-Archive -LiteralPath (Join-Path $sse 'skse64-patch.zip') -DestinationPath $skseRoot -Force
 
           Push-Location $skseRoot
@@ -97,14 +107,28 @@ jobs:
 
             git apply --reject --whitespace=nowarn $patch
             $rejects = @(Get-ChildItem -Path $skseRoot -Recurse -Filter '*.rej' -File)
-            if ($rejects.Count -gt 0) {
-              foreach ($reject in $rejects) {
-                Write-Host "==== REJECT: $($reject.FullName) ====" -ForegroundColor Yellow
+            $sourceRejects = @($rejects | Where-Object { $_.FullName -notmatch '\.vcxproj\.rej$' })
+            if ($sourceRejects.Count -gt 0) {
+              foreach ($reject in $sourceRejects) {
+                Write-Host "==== SOURCE REJECT: $($reject.FullName) ====" -ForegroundColor Yellow
                 Get-Content -LiteralPath $reject.FullName | ForEach-Object { Write-Host $_ }
               }
-              throw "Historical sse-build-resources patch left $($rejects.Count) rejected file(s); see reject hunks above."
+              throw "Historical sse-build-resources patch left $($sourceRejects.Count) source-code rejection(s)."
             }
-            if ($LASTEXITCODE -ne 0) { throw 'Failed to apply sse-build-resources SKSE patch.' }
+
+            $projectRejects = @($rejects | Where-Object { $_.FullName -match '\.vcxproj\.rej$' })
+            foreach ($reject in $projectRejects) {
+              Write-Host "Ignoring unused SKSE project-file reject: $($reject.FullName)" -ForegroundColor DarkYellow
+              Remove-Item -LiteralPath $reject.FullName -Force
+            }
+
+            # IED links the sibling sse-build-resources.vcxproj, which compiles
+            # SKSE sources directly; the rejected original SKSE project files
+            # are not referenced by the IED solution.
+            $remainingRejects = @(Get-ChildItem -Path $skseRoot -Recurse -Filter '*.rej' -File)
+            if ($remainingRejects.Count -ne 0) {
+              throw 'Unexpected patch reject remains after compatibility handling.'
+            }
           } finally {
             Pop-Location
           }
