@@ -13,6 +13,7 @@ $PackageRoot = Join-Path $ProjectRoot "package"
 $PluginRoot = Join-Path $PackageRoot "Data\SKSE\Plugins"
 $ConfigSource = Join-Path $ProjectRoot "config\IEDSyncTogether.ini"
 $IedBuildScript = Join-Path $ProjectRoot "build-ied-patched.ps1"
+$BundledPatchedIedDll = Join-Path $ProjectRoot "third-party\IED-1.7.4\ImmersiveEquipmentDisplays.dll"
 $IedLicenseSource = Join-Path $ProjectRoot "third-party\IED-LICENSE.txt"
 $IedLicenseDestination = Join-Path $PackageRoot "Data\IEDSyncTogether\licenses\IED-LICENSE.txt"
 
@@ -107,21 +108,26 @@ if (-not $dll) {
 }
 
 if (-not $PatchedIedDll) {
-    $PatchedIedDll = Join-Path $BuildRoot "ied-patched\ImmersiveEquipmentDisplays.dll"
+    if (Test-Path -LiteralPath $BundledPatchedIedDll -PathType Leaf) {
+        $PatchedIedDll = $BundledPatchedIedDll
+        Write-Host "Utilisation du DLL IED 1.7.4 patche precompile: $PatchedIedDll" -ForegroundColor Cyan
+    } else {
+        $PatchedIedDll = Join-Path $BuildRoot "ied-patched\ImmersiveEquipmentDisplays.dll"
 
-    if (-not (Test-Path -LiteralPath $PatchedIedDll -PathType Leaf)) {
-        if (-not (Test-Path -LiteralPath $IedBuildScript -PathType Leaf)) {
-            throw "Script de build IED patche introuvable: $IedBuildScript"
-        }
+        if (-not (Test-Path -LiteralPath $PatchedIedDll -PathType Leaf)) {
+            if (-not (Test-Path -LiteralPath $IedBuildScript -PathType Leaf)) {
+                throw "Script de build IED patche introuvable: $IedBuildScript"
+            }
 
-        $iedArgs = @{}
-        if ($IedSourceRoot) {
-            $iedArgs.IedSourceRoot = $IedSourceRoot
-        }
+            $iedArgs = @{}
+            if ($IedSourceRoot) {
+                $iedArgs.IedSourceRoot = $IedSourceRoot
+            }
 
-        & $IedBuildScript @iedArgs
-        if ($LASTEXITCODE -ne 0) {
-            throw "La compilation d'IED 1.7.4 patche a echoue."
+            & $IedBuildScript @iedArgs
+            if ($LASTEXITCODE -ne 0) {
+                throw "La compilation d'IED 1.7.4 patche a echoue."
+            }
         }
     }
 }
@@ -176,7 +182,7 @@ try {
     $zip.Dispose()
 }
 
-Write-Host "" 
+Write-Host ""
 Write-Host "Package Vortex complet cree:" -ForegroundColor Green
 Write-Host $Archive
 Write-Host "Inclut ImmersiveEquipmentDisplays.dll 1.7.4 patche pour IEDSyncTogether." -ForegroundColor Green
