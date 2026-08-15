@@ -14,9 +14,11 @@ item in the remote inventory appear on the proxy.
 ## Intended behavior
 
 - Detect only Skyrim Together remote-player proxies.
-- Capture the 19 forms actually selected by IED on the owning client.
+- Remain dormant after loading a save until a remote STR player proxy actually appears.
+- Capture the 19 forms actually selected by IED on the owning client only while an STR session with a remote player is active.
 - Exchange stable `plugin + local FormID` identities over the LAN.
 - Reproduce that authoritative selection on the matching remote proxy.
+- Suspend capture and clear remote overrides when STR remote-player proxies disappear.
 - Never alter the real inventory or equipment managed by Skyrim Together.
 
 ## Status
@@ -24,7 +26,8 @@ item in the remote inventory appear on the proxy.
 The v0.1 prototype provides:
 
 - Skyrim Together remote-proxy detection.
-- Asynchronous capture of all 19 IED equipment slots.
+- STR-session-gated synchronization: `PostLoadGame` alone never starts IED capture.
+- Asynchronous capture of all 19 IED equipment slots after a remote STR proxy appears.
 - LAN peer discovery and UDP state exchange.
 - Stable cross-client form identities (`plugin + local FormID`).
 - An authoritative remote-slot query in IEDSyncTogether.
@@ -38,6 +41,35 @@ It is built for:
 - SKSE 2.2.6
 - Immersive Equipment Displays 1.7.4
 - Skyrim Together Reborn 1.8.0
+
+## Synchronization lifecycle
+
+Loading a Skyrim save is deliberately separate from joining Skyrim Together:
+
+```text
+DataLoaded
+    -> install IED runtime hook
+    -> start service in dormant mode
+
+PostLoadGame / NewGame
+    -> mark Skyrim world as loaded
+    -> no IED capture yet
+
+manual STR connection
+    -> remote STR player proxy appears
+    -> enable IED capture and remote overrides
+
+STR disconnect / remote proxies disappear
+    -> stop captures
+    -> discard pending remote snapshots
+    -> disable runtime overrides
+```
+
+For this prototype, the presence of at least one remote-player proxy is the
+activation signal relevant to IEDSyncTogether. This intentionally avoids
+assuming that `PostLoadGame` means STR is connected. It also means no slot
+synchronization work is performed while the player is alone and there is no
+remote actor to display.
 
 ## IED 1.7.4 runtime integration
 
@@ -85,10 +117,10 @@ Set `VCPKG_ROOT` if needed, then run:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build-vortex.ps1
 ```
 
-The generated archive is:
+The generated archive uses the version declared in `CMakeLists.txt`, for example:
 
 ```text
-dist/IEDSyncTogether-v0.1.0.zip
+dist/IEDSyncTogether-v0.1.4.zip
 ```
 
 Expected relevant contents:
@@ -127,6 +159,18 @@ A supported installation should contain a line similar to:
 
 ```text
 IED 1.7.4 runtime hook installed: call RVA=0xE3806 SelectSlotItem RVA=0x146360
+```
+
+After loading a save while still disconnected from STR, the log should report:
+
+```text
+Game loaded; waiting for a remote Skyrim Together player before enabling IED synchronization
+```
+
+Only after another STR player becomes available should it report:
+
+```text
+STR session detected: 1 remote player proxy/proxies; enabling IED synchronization
 ```
 
 ## License
