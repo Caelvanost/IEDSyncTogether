@@ -201,3 +201,5 @@ jobs:
           }
           git commit -m 'Update prebuilt patched IED 1.7.4 DLL'
           git push origin HEAD:main
+
+# Validation touch: keep this workflow push-triggered so changes are tested on main.
