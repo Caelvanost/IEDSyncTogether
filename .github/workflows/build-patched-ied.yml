@@ -18,6 +18,8 @@ jobs:
 
     env:
       IED_COMMIT: 3f014c3e8574ef0e88b2ec0b7cdf58b86c9737b0
+      SKSE_COMMIT: 2540ea5e21bd066a53218154b03d938da73624aa
+      COMMON_COMMIT: 75009ab40ad350bef48351db374125304ec83141
       IED_CONFIGURATION: Release MT Post 629 143
       VCPKG_TRIPLET: x64-windows-rel-static-143
 
@@ -40,7 +42,6 @@ jobs:
 
           git clone https://github.com/SlavicPotato/ied-dev.git (Join-Path $root 'ied-dev')
           git -C (Join-Path $root 'ied-dev') checkout $env:IED_COMMIT
-
           git clone https://github.com/clayne/sse-build-resources.git (Join-Path $root 'sse-build-resources')
           git clone https://github.com/clayne/imgui.git (Join-Path $root 'imgui')
           git clone --depth 1 https://github.com/bulletphysics/bullet3.git (Join-Path $root 'bullet3')
@@ -55,23 +56,31 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $sse = Join-Path $env:IED_WORKSPACE 'sse-build-resources'
-          $archive = Join-Path $env:RUNNER_TEMP 'skse64_2_00_17.7z'
-          $extract = Join-Path $env:RUNNER_TEMP 'skse64-source'
-
-          curl.exe -L --fail --retry 3 -o $archive https://skse.silverlock.org/beta/skse64_2_00_17.7z
-          if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
-          & 7z x $archive "-o$extract" -y | Out-Host
-          if ($LASTEXITCODE -ne 0) { throw 'Failed to extract SKSE source archive.' }
-
-          $src = Get-ChildItem -Path $extract -Directory -Recurse |
-            Where-Object { $_.Name -eq 'src' -and (Test-Path (Join-Path $_.FullName 'skse64')) } |
-            Select-Object -First 1
-          if (-not $src) { throw 'Unable to locate SKSE src directory.' }
-
           $skseRoot = Join-Path $sse 'skse64'
-          if (Test-Path $skseRoot) { Remove-Item $skseRoot -Recurse -Force }
+          $skseCheckout = Join-Path $env:RUNNER_TEMP 'skse64-github'
+          $commonCheckout = Join-Path $env:RUNNER_TEMP 'skse-common-github'
+
+          foreach ($path in @($skseRoot, $skseCheckout, $commonCheckout)) {
+            if (Test-Path $path) { Remove-Item $path -Recurse -Force }
+          }
+
+          # GitHub mirrors maintained by the SKSE author. The earliest public
+          # skse64 commit is 2.0.19 / runtime 1.5.97 and is used only as the
+          # pristine source tree onto which sse-build-resources applies its
+          # version-independent patch.
+          git clone https://github.com/ianpatt/skse64.git $skseCheckout
+          git -C $skseCheckout checkout $env:SKSE_COMMIT
+          git clone https://github.com/ianpatt/common.git $commonCheckout
+          git -C $commonCheckout checkout $env:COMMON_COMMIT
+
           New-Item -ItemType Directory -Force -Path $skseRoot | Out-Null
-          Copy-Item -Path (Join-Path $src.FullName '*') -Destination $skseRoot -Recurse -Force
+          Get-ChildItem -LiteralPath $skseCheckout -Force |
+            Where-Object { $_.Name -ne '.git' } |
+            Copy-Item -Destination $skseRoot -Recurse -Force
+          New-Item -ItemType Directory -Force -Path (Join-Path $skseRoot 'common') | Out-Null
+          Get-ChildItem -LiteralPath $commonCheckout -Force |
+            Where-Object { $_.Name -ne '.git' } |
+            Copy-Item -Destination (Join-Path $skseRoot 'common') -Recurse -Force
 
           Expand-Archive -LiteralPath (Join-Path $sse 'skse64-patch.zip') -DestinationPath $skseRoot -Force
 
@@ -84,9 +93,11 @@ jobs:
             git commit -m baseline
 
             $patch = Get-ChildItem -Path $skseRoot -Filter 'skse64.patch' -Recurse | Select-Object -First 1
-            if ($patch) {
-              git apply $patch.FullName
-            }
+            if (-not $patch) { throw 'sse-build-resources skse64.patch not found.' }
+            git apply --check $patch.FullName
+            if ($LASTEXITCODE -ne 0) { throw 'sse-build-resources patch does not apply to pinned GitHub SKSE source.' }
+            git apply $patch.FullName
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to apply sse-build-resources SKSE patch.' }
           } finally {
             Pop-Location
           }
@@ -97,7 +108,6 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $source = Join-Path $env:IED_WORKSPACE 'assimp-source'
           $build = Join-Path $env:IED_WORKSPACE 'assimp'
-
           git clone --depth 1 --branch v5.2.5 https://github.com/assimp/assimp.git $source
           cmake -S $source -B $build -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_CONFIGURATION_TYPES="$env:IED_CONFIGURATION" `
@@ -107,7 +117,6 @@ jobs:
             -DBUILD_SHARED_LIBS=OFF `
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
           if ($LASTEXITCODE -ne 0) { throw 'Assimp CMake generation failed.' }
-
           Copy-Item -Path (Join-Path $source 'include\*') -Destination (Join-Path $build 'include') -Recurse -Force
 
       - name: Prepare vcpkg dependencies
@@ -119,8 +128,7 @@ jobs:
           & (Join-Path $vcpkg 'bootstrap-vcpkg.bat') -disableMetrics
           if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed.' }
 
-          $tripletDir = Join-Path $vcpkg 'triplets\community'
-          $tripletPath = Join-Path $tripletDir "$env:VCPKG_TRIPLET.cmake"
+          $tripletPath = Join-Path $vcpkg "triplets\community\$env:VCPKG_TRIPLET.cmake"
           @'
           set(VCPKG_TARGET_ARCHITECTURE x64)
           set(VCPKG_CRT_LINKAGE static)
@@ -134,10 +142,8 @@ jobs:
             "boost-serialization:$env:VCPKG_TRIPLET" `
             "tbb:$env:VCPKG_TRIPLET"
           if ($LASTEXITCODE -ne 0) { throw 'vcpkg dependency installation failed.' }
-
           & (Join-Path $vcpkg 'vcpkg.exe') integrate install
           if ($LASTEXITCODE -ne 0) { throw 'vcpkg MSBuild integration failed.' }
-
           "VCPKG_ROOT=$vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Apply IEDSyncTogether patch
@@ -148,7 +154,9 @@ jobs:
           Push-Location $env:IED_SOURCE_ROOT
           try {
             git apply --check $patch
+            if ($LASTEXITCODE -ne 0) { throw 'IEDSyncTogether patch does not apply to IED 1.7.4.' }
             git apply $patch
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to apply IEDSyncTogether patch.' }
           } finally {
             Pop-Location
           }
