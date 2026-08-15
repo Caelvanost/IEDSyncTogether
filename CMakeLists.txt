@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
     IEDSyncTogether
-    VERSION 0.1.1
+    VERSION 0.1.2
     LANGUAGES CXX
 )
 
@@ -43,6 +43,7 @@ target_compile_definitions(${PROJECT_NAME}
         WIN32_LEAN_AND_MEAN
         NOMINMAX
         IEDST_BUILD
+        IEDST_VERSION_STRING="${PROJECT_VERSION}"
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32)
