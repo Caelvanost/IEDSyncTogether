@@ -1,6 +1,8 @@
 param(
     [string]$VcpkgRoot = $env:VCPKG_ROOT,
-    [string]$Configuration = "Release"
+    [string]$Configuration = "Release",
+    [string]$IedSourceRoot = $env:IED_SOURCE_ROOT,
+    [string]$PatchedIedDll = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,6 +12,9 @@ $BuildRoot = Join-Path $ProjectRoot "build"
 $PackageRoot = Join-Path $ProjectRoot "package"
 $PluginRoot = Join-Path $PackageRoot "Data\SKSE\Plugins"
 $ConfigSource = Join-Path $ProjectRoot "config\IEDSyncTogether.ini"
+$IedBuildScript = Join-Path $ProjectRoot "build-ied-patched.ps1"
+$IedLicenseSource = Join-Path $ProjectRoot "third-party\IED-LICENSE.txt"
+$IedLicenseDestination = Join-Path $PackageRoot "Data\IEDSyncTogether\licenses\IED-LICENSE.txt"
 
 if (-not $VcpkgRoot) {
     $VcpkgRoot = "C:\dev\vcpkg"
@@ -94,17 +99,54 @@ if ($LASTEXITCODE -ne 0) {
     throw "La compilation a echoue."
 }
 
-$dll = Get-ChildItem -LiteralPath $BuildRoot -Recurse -Filter "IEDSyncTogether.dll" |
+$dll = Get-ChildItem -LiteralPath $BuildRoot -Recurse -Filter "IEDSyncTogether.dll" -File |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
 if (-not $dll) {
     throw "IEDSyncTogether.dll est introuvable apres compilation."
 }
 
+if (-not $PatchedIedDll) {
+    $PatchedIedDll = Join-Path $BuildRoot "ied-patched\ImmersiveEquipmentDisplays.dll"
+
+    if (-not (Test-Path -LiteralPath $PatchedIedDll -PathType Leaf)) {
+        if (-not (Test-Path -LiteralPath $IedBuildScript -PathType Leaf)) {
+            throw "Script de build IED patche introuvable: $IedBuildScript"
+        }
+
+        $iedArgs = @{}
+        if ($IedSourceRoot) {
+            $iedArgs.IedSourceRoot = $IedSourceRoot
+        }
+
+        & $IedBuildScript @iedArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw "La compilation d'IED 1.7.4 patche a echoue."
+        }
+    }
+}
+
+if (-not (Test-Path -LiteralPath $PatchedIedDll -PathType Leaf)) {
+    throw "ImmersiveEquipmentDisplays.dll patche introuvable: $PatchedIedDll"
+}
+$PatchedIedDll = (Resolve-Path -LiteralPath $PatchedIedDll).Path
+
+if (-not (Test-Path -LiteralPath $IedLicenseSource -PathType Leaf)) {
+    throw "Licence IED introuvable: $IedLicenseSource"
+}
+
+if (Test-Path -LiteralPath $PackageRoot) {
+    Remove-Item -LiteralPath $PackageRoot -Recurse -Force
+}
+
 New-Item -ItemType Directory -Force -Path $PluginRoot | Out-Null
 Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $PluginRoot "IEDSyncTogether.dll") -Force
 Copy-Item -LiteralPath $ConfigSource -Destination (Join-Path $PluginRoot "IEDSyncTogether.ini") -Force
+Copy-Item -LiteralPath $PatchedIedDll -Destination (Join-Path $PluginRoot "ImmersiveEquipmentDisplays.dll") -Force
 Write-MinimalPlugin (Join-Path $PackageRoot "Data\IEDSyncTogether.esp")
+
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $IedLicenseDestination) | Out-Null
+Copy-Item -LiteralPath $IedLicenseSource -Destination $IedLicenseDestination -Force
 
 $DistRoot = Join-Path $ProjectRoot "dist"
 New-Item -ItemType Directory -Force -Path $DistRoot | Out-Null
@@ -115,4 +157,26 @@ if (Test-Path -LiteralPath $Archive) {
 }
 Compress-Archive -Path (Join-Path $PackageRoot "*") -DestinationPath $Archive -Force
 
-Write-Host "Package Vortex cree: $Archive" -ForegroundColor Green
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zip = [System.IO.Compression.ZipFile]::OpenRead($Archive)
+try {
+    $entries = @($zip.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
+    foreach ($required in @(
+        "Data/SKSE/Plugins/IEDSyncTogether.dll",
+        "Data/SKSE/Plugins/IEDSyncTogether.ini",
+        "Data/SKSE/Plugins/ImmersiveEquipmentDisplays.dll",
+        "Data/IEDSyncTogether.esp",
+        "Data/IEDSyncTogether/licenses/IED-LICENSE.txt"
+    )) {
+        if ($entries -notcontains $required) {
+            throw "Entree absente de l'archive: $required"
+        }
+    }
+} finally {
+    $zip.Dispose()
+}
+
+Write-Host "" 
+Write-Host "Package Vortex complet cree:" -ForegroundColor Green
+Write-Host $Archive
+Write-Host "Inclut ImmersiveEquipmentDisplays.dll 1.7.4 patche pour IEDSyncTogether." -ForegroundColor Green
