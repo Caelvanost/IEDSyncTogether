@@ -185,6 +185,14 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $patch = Join-Path $env:GITHUB_WORKSPACE 'integration\ied-dev\ied-sync-together.patch'
+          $bridgeSource = Join-Path $env:GITHUB_WORKSPACE 'integration\ied-dev\IEDSyncTogetherBridge.h'
+          $bridgeDestination = Join-Path $env:IED_SOURCE_ROOT 'ImmersiveEquipmentDisplays\IED\Controller\IEDSyncTogetherBridge.h'
+
+          if (-not (Test-Path -LiteralPath $bridgeSource -PathType Leaf)) {
+            throw 'IEDSyncTogether bridge header is missing.'
+          }
+          Copy-Item -LiteralPath $bridgeSource -Destination $bridgeDestination -Force
+
           Push-Location $env:IED_SOURCE_ROOT
           try {
             git apply --check $patch
