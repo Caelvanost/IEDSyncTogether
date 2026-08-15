@@ -23,9 +23,9 @@ namespace IEDSyncTogether
             return skyrimVM && skyrimVM->impl ? skyrimVM->impl.get() : nullptr;
         }
 
-        std::vector<RE::Actor*> CollectDynamicActorCandidates()
+        std::vector<RE::FormID> CollectDynamicActorCandidates()
         {
-            std::vector<RE::Actor*> result;
+            std::vector<RE::FormID> result;
             std::unordered_set<RE::FormID> seen;
             auto* processLists = RE::ProcessLists::GetSingleton();
             if (!processLists) {
@@ -46,7 +46,7 @@ namespace IEDSyncTogether
                     }
 
                     if (seen.insert(formID).second) {
-                        result.push_back(actor);
+                        result.push_back(formID);
                     }
                 }
             };
@@ -67,57 +67,53 @@ namespace IEDSyncTogether
 
         struct ScanRequest
         {
-            ScanRequest(std::size_t count, RemoteProxyScanCallback value) :
-                remaining(count),
+            ScanRequest(
+                std::vector<RE::FormID> candidateIDs,
+                RemoteProxyScanCallback value) :
+                candidates(std::move(candidateIDs)),
                 callback(std::move(value))
             {}
 
-            void Complete(RE::FormID formID, bool isRemote)
-            {
-                RemoteProxyScanCallback finalCallback;
-                std::vector<RE::FormID> finalIDs;
-
-                {
-                    std::scoped_lock lock(mutex);
-                    if (!completed.insert(formID).second) {
-                        return;
-                    }
-
-                    if (isRemote) {
-                        remoteIDs.push_back(formID);
-                    }
-
-                    if (remaining > 0) {
-                        --remaining;
-                    }
-                    if (remaining == 0) {
-                        finalIDs = remoteIDs;
-                        finalCallback = std::move(callback);
-                    }
-                }
-
-                if (!finalCallback) {
-                    return;
-                }
-
-                auto finish = [ids = std::move(finalIDs), callback = std::move(finalCallback)]() mutable {
-                    ReplaceVerifiedRemotePlayers(ids);
-                    callback(std::move(ids));
-                };
-
-                if (auto* tasks = SKSE::GetTaskInterface()) {
-                    tasks->AddTask(std::move(finish));
-                } else {
-                    finish();
-                }
-            }
-
-            std::mutex mutex;
-            std::unordered_set<RE::FormID> completed;
+            std::vector<RE::FormID> candidates;
             std::vector<RE::FormID> remoteIDs;
-            std::size_t remaining{ 0 };
             RemoteProxyScanCallback callback;
         };
+
+        void DispatchProxyCandidate(
+            const std::shared_ptr<ScanRequest>& request,
+            std::size_t index);
+
+        void CompleteProxyCandidate(
+            const std::shared_ptr<ScanRequest>& request,
+            std::size_t index,
+            bool isRemote)
+        {
+            if (index >= request->candidates.size()) {
+                return;
+            }
+
+            const auto formID = request->candidates[index];
+            if (isRemote) {
+                request->remoteIDs.push_back(formID);
+            }
+
+            const auto nextIndex = index + 1;
+            if (nextIndex < request->candidates.size()) {
+                DispatchProxyCandidate(request, nextIndex);
+                return;
+            }
+
+            ReplaceVerifiedRemotePlayers(request->remoteIDs);
+            SKSE::log::debug(
+                "STR proxy validation complete: {}/{} candidate(s) confirmed remote players",
+                request->remoteIDs.size(),
+                request->candidates.size());
+
+            auto callback = std::move(request->callback);
+            if (callback) {
+                callback(std::move(request->remoteIDs));
+            }
+        }
 
         class RemotePlayerResultCallback final :
             public RE::BSScript::IStackCallbackFunctor
@@ -125,15 +121,26 @@ namespace IEDSyncTogether
         public:
             RemotePlayerResultCallback(
                 std::shared_ptr<ScanRequest> request,
-                RE::FormID formID) :
+                std::size_t index) :
                 _request(std::move(request)),
-                _formID(formID)
+                _index(index)
             {}
 
             void operator()(RE::BSScript::Variable result) override
             {
                 const bool isRemote = result.Unpack<bool>();
-                _request->Complete(_formID, isRemote);
+                auto request = _request;
+                const auto index = _index;
+
+                auto complete = [request = std::move(request), index, isRemote]() {
+                    CompleteProxyCandidate(request, index, isRemote);
+                };
+
+                if (auto* tasks = SKSE::GetTaskInterface()) {
+                    tasks->AddTask(std::move(complete));
+                } else {
+                    complete();
+                }
             }
 
             void SetObject(
@@ -144,9 +151,53 @@ namespace IEDSyncTogether
 
         private:
             std::shared_ptr<ScanRequest> _request;
-            RE::FormID _formID{ 0 };
+            std::size_t _index{ 0 };
             RE::BSTSmartPointer<RE::BSScript::Object> _object;
         };
+
+        void DispatchProxyCandidate(
+            const std::shared_ptr<ScanRequest>& request,
+            std::size_t index)
+        {
+            if (index >= request->candidates.size()) {
+                return;
+            }
+
+            auto* vm = GetVM();
+            auto* form = RE::TESForm::LookupByID(request->candidates[index]);
+            auto* actor = form ? form->As<RE::Actor>() : nullptr;
+            if (!vm || !actor) {
+                auto complete = [request, index]() {
+                    CompleteProxyCandidate(request, index, false);
+                };
+                if (auto* tasks = SKSE::GetTaskInterface()) {
+                    tasks->AddTask(std::move(complete));
+                } else {
+                    complete();
+                }
+                return;
+            }
+
+            RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> result(
+                new RemotePlayerResultCallback(request, index));
+
+            const bool dispatched = vm->DispatchStaticCall(
+                RE::BSFixedString(kSTRPapyrusClass.data()),
+                RE::BSFixedString(kSTRIsRemotePlayer.data()),
+                RE::MakeFunctionArguments(static_cast<RE::Actor*>(actor)),
+                result);
+
+            if (!dispatched) {
+                auto complete = [request, index]() {
+                    CompleteProxyCandidate(request, index, false);
+                };
+                if (auto* tasks = SKSE::GetTaskInterface()) {
+                    tasks->AddTask(std::move(complete));
+                } else {
+                    complete();
+                }
+            }
+        }
     }
 
     bool EqualsInsensitive(std::string_view left, std::string_view right)
@@ -168,34 +219,21 @@ namespace IEDSyncTogether
             return false;
         }
 
-        const auto candidates = CollectDynamicActorCandidates();
+        auto candidates = CollectDynamicActorCandidates();
         if (candidates.empty()) {
             ReplaceVerifiedRemotePlayers({});
             callback({});
             return true;
         }
 
-        auto request = std::make_shared<ScanRequest>(candidates.size(), std::move(callback));
         SKSE::log::debug(
-            "STR proxy validation: querying {} dynamic actor candidate(s) through SkyrimTogetherUtils.IsRemotePlayer",
+            "STR proxy validation: sequentially querying {} dynamic actor candidate(s) through SkyrimTogetherUtils.IsRemotePlayer",
             candidates.size());
 
-        for (auto* actor : candidates) {
-            const auto formID = actor->GetFormID();
-            RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> result(
-                new RemotePlayerResultCallback(request, formID));
-
-            const bool dispatched = vm->DispatchStaticCall(
-                RE::BSFixedString(kSTRPapyrusClass.data()),
-                RE::BSFixedString(kSTRIsRemotePlayer.data()),
-                RE::MakeFunctionArguments(static_cast<RE::Actor*>(actor)),
-                result);
-
-            if (!dispatched) {
-                request->Complete(formID, false);
-            }
-        }
-
+        auto request = std::make_shared<ScanRequest>(
+            std::move(candidates),
+            std::move(callback));
+        DispatchProxyCandidate(request, 0);
         return true;
     }
 
