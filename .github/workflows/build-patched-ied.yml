@@ -62,9 +62,6 @@ jobs:
             if (Test-Path $path) { Remove-Item $path -Recurse -Force }
           }
 
-          # This repository contains an exact source snapshot of SKSE 2.0.17.
-          # Sparse checkout keeps the CI input limited to the two directories
-          # present in the original SKSE source archive's src/ folder.
           git clone --filter=blob:none --no-checkout https://github.com/HydrogensaysHDT/hdt-skyrimse-mods.git $mirror
           git -C $mirror sparse-checkout init --cone
           git -C $mirror sparse-checkout set src/common src/skse64
@@ -83,7 +80,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path $skseRoot | Out-Null
           Copy-Item -LiteralPath (Join-Path $mirror 'src\common') -Destination (Join-Path $skseRoot 'common') -Recurse -Force
           Copy-Item -LiteralPath (Join-Path $mirror 'src\skse64') -Destination (Join-Path $skseRoot 'skse64') -Recurse -Force
-
           Expand-Archive -LiteralPath (Join-Path $sse 'skse64-patch.zip') -DestinationPath $skseRoot -Force
 
           Push-Location $skseRoot
@@ -98,9 +94,16 @@ jobs:
             if (-not (Test-Path -LiteralPath $patch -PathType Leaf)) {
               throw 'sse-build-resources skse64.patch not found.'
             }
-            git apply --check $patch
-            if ($LASTEXITCODE -ne 0) { throw 'sse-build-resources patch does not apply to the exact SKSE 2.0.17 snapshot.' }
-            git apply $patch
+
+            git apply --reject --whitespace=nowarn $patch
+            $rejects = @(Get-ChildItem -Path $skseRoot -Recurse -Filter '*.rej' -File)
+            if ($rejects.Count -gt 0) {
+              foreach ($reject in $rejects) {
+                Write-Host "==== REJECT: $($reject.FullName) ====" -ForegroundColor Yellow
+                Get-Content -LiteralPath $reject.FullName | ForEach-Object { Write-Host $_ }
+              }
+              throw "Historical sse-build-resources patch left $($rejects.Count) rejected file(s); see reject hunks above."
+            }
             if ($LASTEXITCODE -ne 0) { throw 'Failed to apply sse-build-resources SKSE patch.' }
           } finally {
             Pop-Location
