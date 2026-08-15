@@ -56,6 +56,7 @@ namespace IEDSyncTogether
             return;
         }
 
+        _gameReady.store(false);
         _config = Config::Load();
         if (!IEDBridge::GetSingleton().IsInstalled()) {
             SKSE::log::critical("Immersive Equipment Displays is not loaded");
@@ -77,13 +78,14 @@ namespace IEDSyncTogether
 
         _timer = std::jthread([this](std::stop_token token) { TimerLoop(token); });
         SKSE::log::info(
-            "Service started: capture={}ms suppressRemoteNpcDisplays={}",
+            "Service started suspended: capture={}ms suppressRemoteNpcDisplays={}",
             _config.captureIntervalMs,
             _config.suppressRemoteNpcDisplays ? 1 : 0);
     }
 
     void SyncService::Stop()
     {
+        _gameReady.store(false);
         if (!_running.exchange(false)) {
             return;
         }
@@ -96,13 +98,9 @@ namespace IEDSyncTogether
 
     void SyncService::Reset()
     {
-        for (const auto formID : _blockedProxies) {
-            if (auto* form = RE::TESForm::LookupByID(formID)) {
-                if (auto* actor = form->As<RE::Actor>()) {
-                    IEDBridge::GetSingleton().SetActorBlocked(actor, false);
-                }
-            }
-        }
+        // Reset is called while Skyrim is tearing down the old save. Do not
+        // invoke IED/Papyrus on actors that may already be in destruction.
+        _gameReady.store(false);
         _blockedProxies.clear();
         {
             std::scoped_lock lock(_snapshotMutex);
@@ -110,6 +108,25 @@ namespace IEDSyncTogether
         }
         _hasLocalSlots = false;
         _capturePending.store(false);
+    }
+
+    void SyncService::SetGameReady(bool ready) noexcept
+    {
+        _gameReady.store(ready);
+        if (!ready) {
+            _capturePending.store(false);
+        }
+        SKSE::log::info("Game state {} for IED synchronization", ready ? "ready" : "suspended");
+    }
+
+    bool SyncService::CanApplyRuntimeOverrides() const
+    {
+        if (!_running.load() || !_gameReady.load()) {
+            return false;
+        }
+
+        std::scoped_lock lock(_snapshotMutex);
+        return !_remoteSnapshots.empty();
     }
 
     void SyncService::TimerLoop(std::stop_token token)
@@ -131,7 +148,7 @@ namespace IEDSyncTogether
 
     void SyncService::Tick()
     {
-        if (!_running.load()) {
+        if (!_running.load() || !_gameReady.load()) {
             return;
         }
 
@@ -145,6 +162,9 @@ namespace IEDSyncTogether
         const bool requested = IEDBridge::GetSingleton().CapturePlayerSlots(
             [this](SlotState slots) {
                 _capturePending.store(false);
+                if (!_gameReady.load()) {
+                    return;
+                }
                 OnLocalCapture(std::move(slots));
             });
         if (!requested) {
@@ -154,6 +174,10 @@ namespace IEDSyncTogether
 
     void SyncService::OnLocalCapture(SlotState slots)
     {
+        if (!_running.load() || !_gameReady.load()) {
+            return;
+        }
+
         const auto now = std::chrono::steady_clock::now();
         const bool changed = !_hasLocalSlots || slots != _localSlots;
         const bool resendDue = !_hasLocalSlots ||
@@ -190,6 +214,10 @@ namespace IEDSyncTogether
 
     void SyncService::HandlePacket(std::string packet)
     {
+        if (!_gameReady.load()) {
+            return;
+        }
+
         if (!packet.starts_with(kGameplayPrefix) || packet.find("|STATE|") == std::string::npos) {
             return;
         }
@@ -302,8 +330,15 @@ namespace IEDSyncTogether
         RE::FormID& outFormID) const
     {
         outFormID = 0;
-        if (slotIndex >= IEDST::kSlotCount) {
+        if (!_running.load() || !_gameReady.load() || slotIndex >= IEDST::kSlotCount) {
             return static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kNotRemote);
+        }
+
+        {
+            std::scoped_lock lock(_snapshotMutex);
+            if (_remoteSnapshots.empty()) {
+                return static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kNotRemote);
+            }
         }
 
         auto* form = RE::TESForm::LookupByID(actorFormID);
