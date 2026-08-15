@@ -11,7 +11,6 @@ namespace IEDSyncTogether
     namespace
     {
         constexpr std::string_view kGameplayPrefix = "IEDST|v1|";
-        std::atomic_bool g_loggedFirstActiveTick{ false };
     }
 
     SyncService& SyncService::GetSingleton()
@@ -57,8 +56,9 @@ namespace IEDSyncTogether
             return;
         }
 
-        _gameReady.store(false);
-        g_loggedFirstActiveTick.store(false);
+        _gameLoaded.store(false);
+        _strConnected.store(false);
+        _remotePlayersAvailable.store(false);
         _config = Config::Load();
         if (!IEDBridge::GetSingleton().IsInstalled()) {
             SKSE::log::critical("Immersive Equipment Displays is not loaded");
@@ -80,14 +80,15 @@ namespace IEDSyncTogether
 
         _timer = std::jthread([this](std::stop_token token) { TimerLoop(token); });
         SKSE::log::info(
-            "Service started suspended: capture={}ms suppressRemoteNpcDisplays={}",
+            "Service started dormant: waiting for loaded save and STR remote-player proxy; capture={}ms suppressRemoteNpcDisplays={}",
             _config.captureIntervalMs,
             _config.suppressRemoteNpcDisplays ? 1 : 0);
     }
 
     void SyncService::Stop()
     {
-        _gameReady.store(false);
+        _gameLoaded.store(false);
+        SuspendSTRSession();
         if (!_running.exchange(false)) {
             return;
         }
@@ -102,30 +103,68 @@ namespace IEDSyncTogether
     {
         // Reset is called while Skyrim is tearing down the old save. Do not
         // invoke IED/Papyrus on actors that may already be in destruction.
-        _gameReady.store(false);
-        g_loggedFirstActiveTick.store(false);
+        _gameLoaded.store(false);
+        SuspendSTRSession();
+    }
+
+    void SyncService::SetGameLoaded(bool loaded) noexcept
+    {
+        _gameLoaded.store(loaded);
+        if (!loaded) {
+            SuspendSTRSession();
+            SKSE::log::info("Game unloaded; STR/IED synchronization suspended");
+            return;
+        }
+
+        // PostLoadGame/NewGame only tells us that Skyrim is ready. STR still
+        // requires a manual connection, so no IED capture starts here.
+        SKSE::log::info("Game loaded; waiting for a remote Skyrim Together player before enabling IED synchronization");
+    }
+
+    void SyncService::SuspendSTRSession()
+    {
+        _strConnected.store(false);
+        _remotePlayersAvailable.store(false);
+        _capturePending.store(false);
         _blockedProxies.clear();
         {
             std::scoped_lock lock(_snapshotMutex);
             _remoteSnapshots.clear();
         }
+        _localSlots = {};
         _hasLocalSlots = false;
-        _capturePending.store(false);
+        _lastSend = {};
     }
 
-    void SyncService::SetGameReady(bool ready) noexcept
+    void SyncService::UpdateSTRSessionState(const std::vector<RE::Actor*>& proxies)
     {
-        _gameReady.store(ready);
-        if (!ready) {
-            _capturePending.store(false);
-            g_loggedFirstActiveTick.store(false);
+        const bool hasRemotePlayers = !proxies.empty();
+        _remotePlayersAvailable.store(hasRemotePlayers);
+
+        const bool wasConnected = _strConnected.exchange(hasRemotePlayers);
+        if (hasRemotePlayers == wasConnected) {
+            return;
         }
-        SKSE::log::info("Game state {} for IED synchronization", ready ? "ready" : "suspended");
+
+        if (hasRemotePlayers) {
+            _capturePending.store(false);
+            _hasLocalSlots = false;
+            _lastSend = {};
+            SKSE::log::info(
+                "STR session detected: {} remote player proxy/proxies; enabling IED synchronization",
+                proxies.size());
+        } else {
+            SKSE::log::info("STR remote player proxies disappeared; suspending IED synchronization");
+            SuspendSTRSession();
+        }
     }
 
     bool SyncService::CanApplyRuntimeOverrides() const
     {
-        if (!_running.load() || !_gameReady.load()) {
+        if (!_running.load() ||
+            !_gameLoaded.load() ||
+            !_strConnected.load() ||
+            !_remotePlayersAvailable.load()) {
             return false;
         }
 
@@ -135,11 +174,11 @@ namespace IEDSyncTogether
 
     void SyncService::TimerLoop(std::stop_token token)
     {
-        // Never enqueue game-thread work while a save is loading. The task queue
-        // can stop draining during loading; continuously adding Tick tasks would
-        // otherwise create a burst immediately after PostLoadGame.
+        // A loaded save is only the point at which it is safe to inspect the
+        // actor lists. Tick itself decides whether an STR session exists. No
+        // Papyrus/IED capture occurs until a remote STR proxy is present.
         while (!token.stop_requested() && _running.load()) {
-            if (!_gameReady.load()) {
+            if (!_gameLoaded.load()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
             }
@@ -160,61 +199,36 @@ namespace IEDSyncTogether
 
     void SyncService::Tick()
     {
-        if (!_running.load() || !_gameReady.load()) {
+        if (!_running.load() || !_gameLoaded.load()) {
             return;
         }
 
-        const bool firstActiveTick = !g_loggedFirstActiveTick.exchange(true);
-        if (firstActiveTick) {
-            SKSE::log::info("First active synchronization tick started");
+        // STR is connected manually after the save loads. A remote-player proxy
+        // is the activation signal relevant to this mod: without one there is
+        // nothing for IEDSyncTogether to synchronize or override.
+        const auto proxies = FindRemotePlayerProxies();
+        UpdateSTRSessionState(proxies);
+        if (!_strConnected.load() || !_remotePlayersAvailable.load()) {
+            return;
         }
 
-        bool hasRemoteSnapshots = false;
-        {
-            std::scoped_lock lock(_snapshotMutex);
-            hasRemoteSnapshots = !_remoteSnapshots.empty();
-        }
-
-        // Proxy discovery is unnecessary before we either have remote state to
-        // match or explicitly need to suppress IED displays on STR proxies.
-        if (_config.suppressRemoteNpcDisplays || hasRemoteSnapshots || !_blockedProxies.empty()) {
-            if (firstActiveTick) {
-                SKSE::log::debug("First active tick: refreshing STR proxy state");
-            }
-            RefreshProxyMitigation();
-            if (firstActiveTick) {
-                SKSE::log::debug("First active tick: STR proxy refresh complete");
-            }
-        } else if (firstActiveTick) {
-            SKSE::log::debug("First active tick: STR proxy refresh skipped (no remote state)");
-        }
+        RefreshProxyMitigation(proxies);
 
         bool expected = false;
         if (!_capturePending.compare_exchange_strong(expected, true)) {
-            if (firstActiveTick) {
-                SKSE::log::debug("First active tick: capture already pending");
-            }
             return;
-        }
-
-        if (firstActiveTick) {
-            SKSE::log::info("First active tick: starting local IED slot capture");
         }
 
         const bool requested = IEDBridge::GetSingleton().CapturePlayerSlots(
             [this](SlotState slots) {
                 _capturePending.store(false);
-                if (!_gameReady.load()) {
+                if (!_gameLoaded.load() ||
+                    !_strConnected.load() ||
+                    !_remotePlayersAvailable.load()) {
                     return;
                 }
                 OnLocalCapture(std::move(slots));
             });
-
-        if (firstActiveTick) {
-            SKSE::log::info(
-                "First active tick: local IED capture dispatch returned requested={}",
-                requested ? 1 : 0);
-        }
 
         if (!requested) {
             _capturePending.store(false);
@@ -223,7 +237,10 @@ namespace IEDSyncTogether
 
     void SyncService::OnLocalCapture(SlotState slots)
     {
-        if (!_running.load() || !_gameReady.load()) {
+        if (!_running.load() ||
+            !_gameLoaded.load() ||
+            !_strConnected.load() ||
+            !_remotePlayersAvailable.load()) {
             return;
         }
 
@@ -263,7 +280,9 @@ namespace IEDSyncTogether
 
     void SyncService::HandlePacket(std::string packet)
     {
-        if (!_gameReady.load()) {
+        if (!_gameLoaded.load() ||
+            !_strConnected.load() ||
+            !_remotePlayersAvailable.load()) {
             return;
         }
 
@@ -336,10 +355,14 @@ namespace IEDSyncTogether
             visible);
     }
 
-    void SyncService::RefreshProxyMitigation()
+    void SyncService::RefreshProxyMitigation(const std::vector<RE::Actor*>& proxies)
     {
         std::unordered_set<RE::FormID> current;
-        for (auto* proxy : FindRemotePlayerProxies()) {
+        for (auto* proxy : proxies) {
+            if (!proxy) {
+                continue;
+            }
+
             current.insert(proxy->GetFormID());
             if (_config.suppressRemoteNpcDisplays &&
                 _blockedProxies.insert(proxy->GetFormID()).second) {
@@ -379,7 +402,11 @@ namespace IEDSyncTogether
         RE::FormID& outFormID) const
     {
         outFormID = 0;
-        if (!_running.load() || !_gameReady.load() || slotIndex >= IEDST::kSlotCount) {
+        if (!_running.load() ||
+            !_gameLoaded.load() ||
+            !_strConnected.load() ||
+            !_remotePlayersAvailable.load() ||
+            slotIndex >= IEDST::kSlotCount) {
             return static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kNotRemote);
         }
 
