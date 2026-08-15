@@ -10,6 +10,12 @@ if (-not (Test-Path -LiteralPath $ImguiRoot -PathType Container)) {
     throw "ImGui checkout introuvable: $ImguiRoot"
 }
 
+# Normalize the checkout path before using .NET file APIs. PowerShell can
+# preserve a caller-relative path while System.IO resolves it against a
+# different process working directory when this script is invoked from a
+# repository subdirectory.
+$ImguiRoot = (Resolve-Path -LiteralPath $ImguiRoot -ErrorAction Stop).Path
+
 $git = Get-Command git.exe -ErrorAction Stop
 & $git.Source -C $ImguiRoot checkout $Commit
 if ($LASTEXITCODE -ne 0) {
