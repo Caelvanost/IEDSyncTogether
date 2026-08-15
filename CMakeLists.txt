@@ -21,6 +21,8 @@ add_commonlibsse_plugin(${PROJECT_NAME}
         src/FormIdentity.h
         src/IEDBridge.cpp
         src/IEDBridge.h
+        src/IEDRuntimeHook.cpp
+        src/IEDRuntimeHook.h
         src/ProxyResolver.cpp
         src/ProxyResolver.h
         src/UdpTransport.cpp
