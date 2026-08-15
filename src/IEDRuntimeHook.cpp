@@ -14,7 +14,7 @@ namespace IEDSyncTogether
         constexpr std::uintptr_t kSelectSlotItemCallRva = 0xE3806;
         constexpr std::uintptr_t kSelectSlotItemRva = 0x146360;
         constexpr std::ptrdiff_t kProcessParamsActorOffset = 0x38;
-        constexpr std::ptrdiff_t kObjectEntrySlotIdOffset = 0x20;
+        constexpr std::ptrdiff_t kObjectEntrySlotIdOffset = 0x24;
 
         // CommonLib searches a +/-2 GiB window around the address passed to
         // Trampoline::create(). Bias the search 1 GiB above the IED call-site,
@@ -141,6 +141,21 @@ namespace IEDSyncTogether
                     MakeEmpty(result);
             }
 
+            // Save loading and the pre-network state must be indistinguishable
+            // from stock IED. This also prevents us from reading private IED
+            // structure offsets until an actual remote snapshot exists.
+            auto& service = SyncService::GetSingleton();
+            if (!service.CanApplyRuntimeOverrides()) {
+                return g_originalSelectSlotItem(
+                    result,
+                    processParams,
+                    configSlot,
+                    candidates,
+                    objectEntrySlot);
+            }
+
+            // Verified against the official IED 1.7.4 binary:
+            // ProcessParams::CommonParams::actor is read at +0x38 in ProcessSlots.
             const auto paramsBytes = static_cast<const std::byte*>(processParams);
             auto* actor = *reinterpret_cast<RE::Actor* const*>(
                 paramsBytes + kProcessParamsActorOffset);
@@ -153,6 +168,8 @@ namespace IEDSyncTogether
                     objectEntrySlot);
             }
 
+            // Verified at the SelectSlotItem call-site: ObjectEntrySlot::slotid
+            // is read from +0x24 immediately after the call returns.
             const auto slotBytes = static_cast<const std::byte*>(objectEntrySlot);
             const auto slotIndex = *reinterpret_cast<const std::uint32_t*>(
                 slotBytes + kObjectEntrySlotIdOffset);
@@ -166,7 +183,7 @@ namespace IEDSyncTogether
             }
 
             RE::FormID desiredForm = 0;
-            const auto overrideResult = SyncService::GetSingleton().QueryRemoteSlot(
+            const auto overrideResult = service.QueryRemoteSlot(
                 actor->GetFormID(),
                 slotIndex,
                 desiredForm);
