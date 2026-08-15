@@ -16,6 +16,12 @@ namespace IEDSyncTogether
         constexpr std::ptrdiff_t kProcessParamsActorOffset = 0x38;
         constexpr std::ptrdiff_t kObjectEntrySlotIdOffset = 0x20;
 
+        // CommonLib searches a +/-2 GiB window around the address passed to
+        // Trampoline::create(). Bias the search 1 GiB above the IED call-site,
+        // so its low-to-high allocator starts at callSite-1 GiB instead of the
+        // fragile exact -2 GiB rel32 boundary.
+        constexpr std::uintptr_t kTrampolineSearchBias = 0x40000000ull;
+
         constexpr std::array<std::uint8_t, 5> kExpectedCall{
             0xE8, 0x55, 0x2B, 0x06, 0x00
         };
@@ -24,6 +30,24 @@ namespace IEDSyncTogether
             0x4C, 0x89, 0x4C, 0x24, 0x20, 0x53, 0x56, 0x57,
             0x41, 0x54, 0x41, 0x55, 0x48, 0x83, 0xEC, 0x30
         };
+
+#pragma pack(push, 1)
+        struct AbsoluteJumpRelay
+        {
+            std::uint8_t jmp{ 0xFF };
+            std::uint8_t modrm{ 0x25 };
+            std::int32_t displacement{ 0 };
+            std::uint64_t target{ 0 };
+        };
+        static_assert(sizeof(AbsoluteJumpRelay) == 0xE);
+
+        struct RelativeCall
+        {
+            std::uint8_t opcode{ 0xE8 };
+            std::int32_t displacement{ 0 };
+        };
+        static_assert(sizeof(RelativeCall) == 0x5);
+#pragma pack(pop)
 
         struct ItemDataABI
         {
@@ -71,6 +95,24 @@ namespace IEDSyncTogether
                 reinterpret_cast<const void*>(address),
                 expected.data(),
                 expected.size()) == 0;
+        }
+
+        bool GetRelative32(
+            std::uintptr_t nextInstruction,
+            std::uintptr_t target,
+            std::int32_t& out) noexcept
+        {
+            const auto displacement =
+                static_cast<std::int64_t>(target) -
+                static_cast<std::int64_t>(nextInstruction);
+
+            if (displacement < (std::numeric_limits<std::int32_t>::min)() ||
+                displacement > (std::numeric_limits<std::int32_t>::max)()) {
+                return false;
+            }
+
+            out = static_cast<std::int32_t>(displacement);
+            return true;
         }
 
         SelectedItemABI* MakeEmpty(SelectedItemABI* result) noexcept
@@ -207,12 +249,12 @@ namespace IEDSyncTogether
             return false;
         }
 
-        std::int32_t displacement = 0;
+        std::int32_t originalDisplacement = 0;
         std::memcpy(
-            &displacement,
+            &originalDisplacement,
             reinterpret_cast<const void*>(callSite + 1),
-            sizeof(displacement));
-        const auto originalTarget = callSite + 5 + displacement;
+            sizeof(originalDisplacement));
+        const auto originalTarget = callSite + 5 + originalDisplacement;
         if (originalTarget != selectSlotItem) {
             SKSE::log::critical(
                 "IED runtime hook: call target mismatch (expected RVA 0x{:X})",
@@ -220,22 +262,39 @@ namespace IEDSyncTogether
             return false;
         }
 
-        g_iedTrampoline.create(64, module);
-        const auto original = g_iedTrampoline.write_call<5>(
-            callSite,
-            SelectSlotItemHook);
-        g_originalSelectSlotItem = reinterpret_cast<SelectSlotItemFn>(original);
+        // A 5-byte x64 CALL can only reach +/-2 GiB. IEDSyncTogether.dll may be
+        // loaded farther away than that, so place an absolute-jump relay near
+        // IED and patch the original CALL to target the relay.
+        const auto searchCenter = callSite + kTrampolineSearchBias;
+        g_iedTrampoline.create(
+            64,
+            reinterpret_cast<void*>(searchCenter));
 
-        if (reinterpret_cast<std::uintptr_t>(g_originalSelectSlotItem) != selectSlotItem) {
-            SKSE::log::critical("IED runtime hook: trampoline returned an unexpected original target");
+        auto* relay = g_iedTrampoline.allocate<AbsoluteJumpRelay>();
+        relay->target = reinterpret_cast<std::uint64_t>(&SelectSlotItemHook);
+
+        std::int32_t relayDisplacement = 0;
+        const auto relayAddress = reinterpret_cast<std::uintptr_t>(relay);
+        if (!GetRelative32(callSite + sizeof(RelativeCall), relayAddress, relayDisplacement)) {
+            SKSE::log::critical(
+                "IED runtime hook: allocated relay is outside rel32 range (call=0x{:X}, relay=0x{:X})",
+                callSite,
+                relayAddress);
             return false;
         }
 
+        RelativeCall patchedCall;
+        patchedCall.displacement = relayDisplacement;
+        REL::safe_write(callSite, &patchedCall, sizeof(patchedCall));
+
+        g_originalSelectSlotItem = reinterpret_cast<SelectSlotItemFn>(selectSlotItem);
         g_installed = true;
+
         SKSE::log::info(
-            "IED 1.7.4 runtime hook installed: call RVA=0x{:X} SelectSlotItem RVA=0x{:X}",
+            "IED 1.7.4 runtime hook installed: call RVA=0x{:X} SelectSlotItem RVA=0x{:X} relay=0x{:X}",
             kSelectSlotItemCallRva,
-            kSelectSlotItemRva);
+            kSelectSlotItemRva,
+            relayAddress);
         return true;
     }
 
