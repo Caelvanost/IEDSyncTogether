@@ -14,7 +14,7 @@ namespace IEDSyncTogether
         void Start();
         void Stop();
         void Reset();
-        void SetGameReady(bool ready) noexcept;
+        void SetGameLoaded(bool loaded) noexcept;
         [[nodiscard]] bool CanApplyRuntimeOverrides() const;
         void HandlePacket(std::string packet);
         std::uint32_t QueryRemoteSlot(
@@ -38,7 +38,9 @@ namespace IEDSyncTogether
         void TimerLoop(std::stop_token token);
         void Tick();
         void OnLocalCapture(SlotState slots);
-        void RefreshProxyMitigation();
+        void UpdateSTRSessionState(const std::vector<RE::Actor*>& proxies);
+        void SuspendSTRSession();
+        void RefreshProxyMitigation(const std::vector<RE::Actor*>& proxies);
         void LogRemoteResolution(std::string_view sender, RemoteSnapshot& snapshot);
 
         static std::optional<std::string> ReadField(
@@ -49,7 +51,9 @@ namespace IEDSyncTogether
         Config _config{};
         std::jthread _timer;
         std::atomic_bool _running{ false };
-        std::atomic_bool _gameReady{ false };
+        std::atomic_bool _gameLoaded{ false };
+        std::atomic_bool _strConnected{ false };
+        std::atomic_bool _remotePlayersAvailable{ false };
         std::atomic_bool _capturePending{ false };
         SlotState _localSlots{};
         bool _hasLocalSlots{ false };
