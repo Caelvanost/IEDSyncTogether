@@ -10,9 +10,21 @@ $BuildRoot = Join-Path $ProjectRoot "build"
 $PackageRoot = Join-Path $ProjectRoot "package"
 $PluginRoot = Join-Path $PackageRoot "Data\SKSE\Plugins"
 $ConfigSource = Join-Path $ProjectRoot "config\IEDSyncTogether.ini"
-$OptionalRelayHostPackage = Join-Path $ProjectRoot "optional\RelayHost\package"
+$OptionalHostPackage = Join-Path $ProjectRoot "optional\RelayHost\package"
 $FomodSource = Join-Path $ProjectRoot "fomod"
 $StageRoot = [System.IO.Path]::GetFullPath((Join-Path $BuildRoot "fomod-stage"))
+$CMakeLists = Join-Path $ProjectRoot "CMakeLists.txt"
+
+$CMakeContent = Get-Content -LiteralPath $CMakeLists -Raw
+$VersionMatch = [regex]::Match($CMakeContent, '(?ms)project\s*\(\s*IEDSyncTogether\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)')
+if (-not $VersionMatch.Success) {
+    throw "Impossible de lire la version dans CMakeLists.txt."
+}
+$Version = $VersionMatch.Groups[1].Value
+
+Write-Host "Nettoyage des dossiers build et package..." -ForegroundColor Cyan
+Remove-Item -LiteralPath $BuildRoot -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $PackageRoot -Recurse -Force -ErrorAction SilentlyContinue
 
 if (-not $VcpkgRoot) {
     $VcpkgRoot = "C:\dev\vcpkg"
@@ -110,38 +122,45 @@ Copy-Item -LiteralPath $ConfigSource -Destination (Join-Path $PluginRoot "IEDSyn
 Write-MinimalPlugin (Join-Path $PackageRoot "Data\IEDSyncTogether.esp")
 
 $CoreIni = Join-Path $PluginRoot "IEDSyncTogether.ini"
-$RelayHostIni = Join-Path $OptionalRelayHostPackage "Data\SKSE\Plugins\IEDSyncTogether_RelayHost.ini"
+$HostIni = Join-Path $OptionalHostPackage "Data\SKSE\Plugins\IEDSyncTogether_RelayHost.ini"
 $ModuleConfig = Join-Path $FomodSource "ModuleConfig.xml"
 $Info = Join-Path $FomodSource "info.xml"
 
-foreach ($RequiredPath in @($CoreIni, $RelayHostIni, $ModuleConfig, $Info)) {
+foreach ($RequiredPath in @($CoreIni, $HostIni, $ModuleConfig, $Info)) {
     if (-not (Test-Path -LiteralPath $RequiredPath)) {
         throw "Fichier FOMOD requis introuvable: $RequiredPath"
     }
 }
 
 $CoreIniContent = Get-Content -LiteralPath $CoreIni -Raw
-$RelayHostIniContent = Get-Content -LiteralPath $RelayHostIni -Raw
-if ($CoreIniContent -notmatch '(?ms)^\[Network\].*?^Transport=STR\s*$') {
-    throw "Le profil FOMOD principal doit utiliser Transport=STR."
-}
-if ($CoreIniContent -notmatch '(?ms)^\[Network\].*?^UdpFallback=0\s*$') {
-    throw "Le profil FOMOD principal doit desactiver UdpFallback."
-}
-if ($CoreIniContent -notmatch '(?ms)^\[Network\].*?^RequireStrBridge=1\s*$') {
-    throw "Le profil FOMOD principal doit exiger RequireStrBridge=1."
+$HostIniContent = Get-Content -LiteralPath $HostIni -Raw
+
+if ($CoreIniContent -notmatch '(?ms)^\[Network\].*?^Transport=UDP\s*$') {
+    throw "Le profil Client doit utiliser Transport=UDP."
 }
 if ($CoreIniContent -notmatch '(?ms)^\[Network\].*?^RelayMode=0\s*$') {
-    throw "Le profil FOMOD principal doit desactiver RelayMode."
+    throw "Le profil Client doit desactiver RelayMode."
 }
-if ($RelayHostIniContent -notmatch '(?ms)^\[Network\].*?^Transport=UDP\s*$') {
-    throw "Le profil FOMOD UDP legacy doit utiliser Transport=UDP."
+if ($CoreIniContent -notmatch '(?ms)^\[Network\].*?^AutoRemoteFromSTR=1\s*$') {
+    throw "Le profil Client doit activer AutoRemoteFromSTR."
 }
-if ($RelayHostIniContent -notmatch '(?ms)^\[Network\].*?^RequireStrBridge=0\s*$') {
-    throw "Le profil FOMOD UDP legacy doit desactiver RequireStrBridge."
+if ($CoreIniContent -notmatch '(?ms)^\[Network\].*?^AutoSharedSecretFromSTR=1\s*$') {
+    throw "Le profil Client doit activer AutoSharedSecretFromSTR."
 }
-if ($RelayHostIniContent -notmatch '(?ms)^\[Network\].*?^RelayMode=1\s*$') {
-    throw "Le profil FOMOD UDP legacy doit activer RelayMode."
+if ($HostIniContent -notmatch '(?ms)^\[Network\].*?^Transport=UDP\s*$') {
+    throw "Le profil Host doit utiliser Transport=UDP."
+}
+if ($HostIniContent -notmatch '(?ms)^\[Network\].*?^RequireStrBridge=0\s*$') {
+    throw "Le profil Host doit desactiver RequireStrBridge."
+}
+if ($HostIniContent -notmatch '(?ms)^\[Network\].*?^RelayMode=1\s*$') {
+    throw "Le profil Host doit activer RelayMode."
+}
+if ($HostIniContent -notmatch '(?ms)^\[Network\].*?^AutoRemoteFromSTR=0\s*$') {
+    throw "Le profil Host doit desactiver AutoRemoteFromSTR."
+}
+if ($HostIniContent -notmatch '(?ms)^\[Network\].*?^AutoSharedSecretFromSTR=1\s*$') {
+    throw "Le profil Host doit activer AutoSharedSecretFromSTR."
 }
 
 try {
@@ -160,18 +179,18 @@ if (Test-Path -LiteralPath $StageRoot) {
 }
 
 $CoreStage = Join-Path $StageRoot "00 Core"
-$RelayHostStage = Join-Path $StageRoot "20 Legacy UDP Relay Host"
+$HostStage = Join-Path $StageRoot "20 Host"
 $FomodStage = Join-Path $StageRoot "fomod"
-New-Item -ItemType Directory -Force -Path $CoreStage, $RelayHostStage, $FomodStage | Out-Null
+New-Item -ItemType Directory -Force -Path $CoreStage, $HostStage, $FomodStage | Out-Null
 
 Copy-Item -Path (Join-Path $PackageRoot "*") -Destination $CoreStage -Recurse -Force
-Copy-Item -Path (Join-Path $OptionalRelayHostPackage "*") -Destination $RelayHostStage -Recurse -Force
+Copy-Item -Path (Join-Path $OptionalHostPackage "*") -Destination $HostStage -Recurse -Force
 Copy-Item -Path (Join-Path $FomodSource "*") -Destination $FomodStage -Recurse -Force
 
 $DistRoot = Join-Path $ProjectRoot "dist"
 New-Item -ItemType Directory -Force -Path $DistRoot | Out-Null
 
-$Archive = Join-Path $DistRoot "IEDSyncTogether-v0.2.0-FOMOD.zip"
+$Archive = Join-Path $DistRoot "IEDSyncTogether-v$Version-FOMOD.zip"
 if (Test-Path -LiteralPath $Archive) {
     Remove-Item -LiteralPath $Archive -Force
 }
@@ -186,7 +205,7 @@ try {
         "00 Core/Data/IEDSyncTogether.esp",
         "00 Core/Data/SKSE/Plugins/IEDSyncTogether.dll",
         "00 Core/Data/SKSE/Plugins/IEDSyncTogether.ini",
-        "20 Legacy UDP Relay Host/Data/SKSE/Plugins/IEDSyncTogether_RelayHost.ini",
+        "20 Host/Data/SKSE/Plugins/IEDSyncTogether_RelayHost.ini",
         "fomod/ModuleConfig.xml",
         "fomod/info.xml"
     )
@@ -194,6 +213,10 @@ try {
         if ($Entries -notcontains $RequiredEntry) {
             throw "Entree FOMOD absente de l'archive: $RequiredEntry"
         }
+    }
+
+    if ($Entries -contains "00 Core/Data/SKSE/Plugins/ImmersiveEquipmentDisplays.dll") {
+        throw "L'archive ne doit pas embarquer ImmersiveEquipmentDisplays.dll officiel."
     }
 } finally {
     $Zip.Dispose()
