@@ -1,7 +1,6 @@
 #include "PCH.h"
 
 #include "IEDSyncTogether/Interface.h"
-#include "IEDRuntimeHook.h"
 #include "SyncService.h"
 
 namespace
@@ -29,11 +28,9 @@ namespace
 
         switch (message->type) {
         case SKSE::MessagingInterface::kDataLoaded:
-            if (!IEDRuntimeHook::Install()) {
-                SKSE::log::critical(
-                    "IEDSyncTogether disabled: supported IED 1.7.4 runtime hook could not be installed");
-                break;
-            }
+            // Do not patch IED while Skyrim is starting or loading a save.
+            // The runtime hook is installed lazily only after a LAN peer has
+            // been matched to a dynamic remote-player actor.
             service.Start();
             break;
 
@@ -44,9 +41,6 @@ namespace
 
         case SKSE::MessagingInterface::kPostLoadGame:
         case SKSE::MessagingInterface::kNewGame:
-            // A loaded save does not mean Skyrim Together is connected. Keep the
-            // synchronization service dormant until a remote STR player proxy is
-            // actually present in the game world.
             service.SetGameLoaded(true);
             break;
 
