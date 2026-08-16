@@ -28,6 +28,13 @@ if (-not (Test-Path -LiteralPath $Toolchain)) {
     throw "Toolchain vcpkg introuvable: $Toolchain"
 }
 
+Write-Host "Nettoyage des dossiers build et package..." -ForegroundColor Cyan
+foreach ($path in @($BuildRoot, $PackageRoot)) {
+    if (Test-Path -LiteralPath $path) {
+        Remove-Item -LiteralPath $path -Recurse -Force
+    }
+}
+
 function Write-Subrecord {
     param(
         [System.IO.BinaryWriter]$Writer,
@@ -107,10 +114,6 @@ $dll = Get-ChildItem -LiteralPath $BuildRoot -Recurse -Filter "IEDSyncTogether.d
     Select-Object -First 1
 if (-not $dll) {
     throw "IEDSyncTogether.dll est introuvable apres compilation."
-}
-
-if (Test-Path -LiteralPath $PackageRoot) {
-    Remove-Item -LiteralPath $PackageRoot -Recurse -Force
 }
 
 New-Item -ItemType Directory -Force -Path $PluginRoot | Out-Null
