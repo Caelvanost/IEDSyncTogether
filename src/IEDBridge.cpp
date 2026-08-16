@@ -1,6 +1,8 @@
 #include "PCH.h"
 #include "IEDBridge.h"
 
+#include "IEDRuntimeHook.h"
+
 #include <RE/F/FunctionArguments.h>
 #include <RE/I/IStackCallbackFunctor.h>
 #include <RE/P/PackUnpack.h>
@@ -180,13 +182,11 @@ namespace IEDSyncTogether
             return false;
         }
 
-        // Diagnostic safety mode: capture and LAN state exchange are exercised
-        // with stock IED completely unpatched. This isolates the capture/network
-        // path from the runtime SelectSlotItem hook.
         const bool diagnostic = !g_firstCaptureStarted.exchange(true);
         if (diagnostic) {
             SKSE::log::info(
-                "First IED capture: runtime hook disabled for capture-path validation; starting sequential 19-slot capture player={:08X}",
+                "First IED capture: early runtime hook installed={} ; starting sequential 19-slot capture player={:08X}",
+                IEDRuntimeHook::IsInstalled() ? 1 : 0,
                 player->GetFormID());
         }
 
