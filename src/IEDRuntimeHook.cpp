@@ -336,13 +336,17 @@ namespace IEDSyncTogether
 
         RelativeCall patchedCall;
         patchedCall.displacement = relayDisplacement;
-        REL::safe_write(callSite, &patchedCall, sizeof(patchedCall));
 
+        // Publish the original target before the call-site is rewritten. Even
+        // though this now runs at DataLoaded, this ordering also eliminates the
+        // tiny window where another thread could enter the relay while the
+        // original function pointer is still null.
         g_originalSelectSlotItem = reinterpret_cast<SelectSlotItemFn>(selectSlotItem);
+        REL::safe_write(callSite, &patchedCall, sizeof(patchedCall));
         g_installed = true;
 
         SKSE::log::info(
-            "IED 1.7.4 runtime hook installed: call RVA=0x{:X} SelectSlotItem RVA=0x{:X} relay=0x{:X}",
+            "IED 1.7.4 runtime hook installed early: call RVA=0x{:X} SelectSlotItem RVA=0x{:X} relay=0x{:X}",
             kSelectSlotItemCallRva,
             kSelectSlotItemRva,
             relayAddress);
