@@ -25,7 +25,6 @@ namespace IEDSyncTogether
         }
 
         [[nodiscard]] std::string GetLocalPlayerName() const;
-        [[nodiscard]] std::vector<std::string> GetPeerNames();
 
     private:
         struct Peer
