@@ -1,11 +1,9 @@
 #include "PCH.h"
 #include "IEDRuntimeHook.h"
 
-#include "IEDSyncTogether/Interface.h"
-#include "SyncService.h"
-
 #include <cstddef>
 #include <cstring>
+#include <limits>
 
 namespace IEDSyncTogether
 {
@@ -13,12 +11,10 @@ namespace IEDSyncTogether
     {
         constexpr std::uintptr_t kSelectSlotItemCallRva = 0xE3806;
         constexpr std::uintptr_t kSelectSlotItemRva = 0x146360;
-        constexpr std::ptrdiff_t kObjectEntrySlotIdOffset = 0x24;
 
         // CommonLib searches a +/-2 GiB window around the address passed to
         // Trampoline::create(). Bias the search 1 GiB above the IED call-site,
-        // so its low-to-high allocator starts at callSite-1 GiB instead of the
-        // fragile exact -2 GiB rel32 boundary.
+        // so its low-to-high allocator starts comfortably inside rel32 range.
         constexpr std::uintptr_t kTrampolineSearchBias = 0x40000000ull;
 
         constexpr std::array<std::uint8_t, 5> kExpectedCall{
@@ -31,6 +27,13 @@ namespace IEDSyncTogether
         };
 
 #pragma pack(push, 1)
+        // CALL site -> this relay -> JMP stock IED SelectSlotItem.
+        //
+        // This deliberately does not enter a C++ hook. The original CALL has
+        // already pushed ProcessSlots' return address; the relay preserves all
+        // argument registers and stack contents and tail-jumps to the official
+        // IED function. SelectSlotItem's RET therefore returns directly to the
+        // instruction after the original CALL, exactly as it did before patching.
         struct AbsoluteJumpRelay
         {
             std::uint8_t jmp{ 0xFF };
@@ -48,58 +51,6 @@ namespace IEDSyncTogether
         static_assert(sizeof(RelativeCall) == 0x5);
 #pragma pack(pop)
 
-        // IED 1.7.4 ProcessParams inherits ProcessParamsData first, and the
-        // first member of ProcessParamsData is Game::ObjectRefHandle. Both the
-        // historical IED handle and Skyrim's native reference handle are a
-        // single 32-bit value. Resolve that stable handle instead of reading a
-        // guessed Actor* offset from IED's private multiple-inheritance layout.
-        struct ObjectRefHandleABI
-        {
-            std::uint32_t value;
-        };
-        static_assert(sizeof(ObjectRefHandleABI) == sizeof(std::uint32_t));
-
-        struct ItemDataABI
-        {
-            RE::TESBoundObject* form;
-        };
-
-        struct SlotCandidateABI
-        {
-            const ItemDataABI* item;
-            std::uint32_t extra;
-            std::uint32_t rating;
-        };
-        static_assert(sizeof(SlotCandidateABI) == 0x10);
-
-        struct SlotItemCandidatesABI
-        {
-            SlotCandidateABI* begin;
-            SlotCandidateABI* end;
-            SlotCandidateABI* capacity;
-        };
-        static_assert(sizeof(SlotItemCandidatesABI) == 0x18);
-
-        struct SelectedItemABI
-        {
-            SlotCandidateABI* iterator;
-            bool hasValue;
-            std::byte padding[7];
-        };
-        static_assert(sizeof(SelectedItemABI) == 0x10);
-
-        using SelectSlotItemFn = SelectedItemABI* (*)(
-            SelectedItemABI* result,
-            void* processParams,
-            const void* configSlot,
-            SlotItemCandidatesABI* candidates,
-            const void* objectEntrySlot) noexcept;
-
-        using LookupActorHandleFn = bool (*)(
-            const ObjectRefHandleABI& handle,
-            RE::NiPointer<RE::Actor>& out);
-
-        SelectSlotItemFn g_originalSelectSlotItem{ nullptr };
         SKSE::Trampoline g_iedTrampoline{ "IEDSyncTogether.IED" };
         bool g_installed{ false };
 
@@ -128,146 +79,6 @@ namespace IEDSyncTogether
             out = static_cast<std::int32_t>(displacement);
             return true;
         }
-
-        bool ResolveProcessParamsActor(
-            const void* processParams,
-            RE::NiPointer<RE::Actor>& out) noexcept
-        {
-            out = nullptr;
-            if (!processParams) {
-                return false;
-            }
-
-            ObjectRefHandleABI handle{};
-            std::memcpy(&handle, processParams, sizeof(handle));
-            if (handle.value == 0) {
-                return false;
-            }
-
-            // Same engine lookup used by CommonLibSSE-NG's
-            // BSPointerHandleManagerInterface<T>::GetSmartPointer().
-            static REL::Relocation<LookupActorHandleFn> lookup{
-                RELOCATION_ID(12204, 12332)
-            };
-
-            return lookup(handle, out) && out != nullptr;
-        }
-
-        SelectedItemABI* MakeEmpty(SelectedItemABI* result) noexcept
-        {
-            if (result) {
-                result->iterator = nullptr;
-                result->hasValue = false;
-            }
-            return result;
-        }
-
-        SelectedItemABI* SelectSlotItemHook(
-            SelectedItemABI* result,
-            void* processParams,
-            const void* configSlot,
-            SlotItemCandidatesABI* candidates,
-            const void* objectEntrySlot) noexcept
-        {
-            if (!g_originalSelectSlotItem ||
-                !result ||
-                !processParams ||
-                !candidates ||
-                !objectEntrySlot) {
-                return g_originalSelectSlotItem ?
-                    g_originalSelectSlotItem(result, processParams, configSlot, candidates, objectEntrySlot) :
-                    MakeEmpty(result);
-            }
-
-            // Save loading and the pre-network state must be indistinguishable
-            // from stock IED. Do not inspect any IED-private data until an
-            // actual remote snapshot exists.
-            auto& service = SyncService::GetSingleton();
-            if (!service.CanApplyRuntimeOverrides()) {
-                return g_originalSelectSlotItem(
-                    result,
-                    processParams,
-                    configSlot,
-                    candidates,
-                    objectEntrySlot);
-            }
-
-            RE::NiPointer<RE::Actor> actor;
-            if (!ResolveProcessParamsActor(processParams, actor)) {
-                return g_originalSelectSlotItem(
-                    result,
-                    processParams,
-                    configSlot,
-                    candidates,
-                    objectEntrySlot);
-            }
-
-            // Verified at the SelectSlotItem call-site: ObjectEntrySlot::slotid
-            // is read from +0x24 immediately after the call returns.
-            const auto slotBytes = static_cast<const std::byte*>(objectEntrySlot);
-            const auto slotIndex = *reinterpret_cast<const std::uint32_t*>(
-                slotBytes + kObjectEntrySlotIdOffset);
-            if (slotIndex >= IEDST::kSlotCount) {
-                return g_originalSelectSlotItem(
-                    result,
-                    processParams,
-                    configSlot,
-                    candidates,
-                    objectEntrySlot);
-            }
-
-            RE::FormID desiredForm = 0;
-            const auto overrideResult = service.QueryRemoteSlot(
-                actor->GetFormID(),
-                slotIndex,
-                desiredForm);
-
-            switch (static_cast<IEDST::SlotOverrideResult>(overrideResult)) {
-            case IEDST::SlotOverrideResult::kNotRemote:
-                return g_originalSelectSlotItem(
-                    result,
-                    processParams,
-                    configSlot,
-                    candidates,
-                    objectEntrySlot);
-
-            case IEDST::SlotOverrideResult::kEmpty:
-                return MakeEmpty(result);
-
-            case IEDST::SlotOverrideResult::kForm:
-                break;
-
-            default:
-                return g_originalSelectSlotItem(
-                    result,
-                    processParams,
-                    configSlot,
-                    candidates,
-                    objectEntrySlot);
-            }
-
-            if (!desiredForm || !candidates->begin || !candidates->end) {
-                return MakeEmpty(result);
-            }
-
-            for (auto* candidate = candidates->begin;
-                 candidate != candidates->end;
-                 ++candidate) {
-                if (!candidate->item || !candidate->item->form) {
-                    continue;
-                }
-
-                if (candidate->item->form->GetFormID() == desiredForm) {
-                    result->iterator = candidate;
-                    result->hasValue = true;
-                    return result;
-                }
-            }
-
-            // The remote state is authoritative. If its form is unavailable in
-            // IED's locally generated candidate set, keep this display slot empty.
-            return MakeEmpty(result);
-        }
     }
 
     bool IEDRuntimeHook::Install()
@@ -278,7 +89,7 @@ namespace IEDSyncTogether
 
         const auto module = GetModuleHandleW(L"ImmersiveEquipmentDisplays.dll");
         if (!module) {
-            SKSE::log::critical("IED runtime hook: ImmersiveEquipmentDisplays.dll is not loaded");
+            SKSE::log::critical("IED transparent shim: ImmersiveEquipmentDisplays.dll is not loaded");
             return false;
         }
 
@@ -288,14 +99,14 @@ namespace IEDSyncTogether
 
         if (!MatchBytes(callSite, kExpectedCall)) {
             SKSE::log::critical(
-                "IED runtime hook: unsupported IED build (SelectSlotItem call signature mismatch at RVA 0x{:X})",
+                "IED transparent shim: unsupported IED build (SelectSlotItem call signature mismatch at RVA 0x{:X})",
                 kSelectSlotItemCallRva);
             return false;
         }
 
         if (!MatchBytes(selectSlotItem, kExpectedSelectSlotItemPrologue)) {
             SKSE::log::critical(
-                "IED runtime hook: unsupported IED build (SelectSlotItem signature mismatch at RVA 0x{:X})",
+                "IED transparent shim: unsupported IED build (SelectSlotItem signature mismatch at RVA 0x{:X})",
                 kSelectSlotItemRva);
             return false;
         }
@@ -305,51 +116,46 @@ namespace IEDSyncTogether
             &originalDisplacement,
             reinterpret_cast<const void*>(callSite + 1),
             sizeof(originalDisplacement));
-        const auto originalTarget = callSite + 5 + originalDisplacement;
+        const auto originalTarget = callSite + sizeof(RelativeCall) + originalDisplacement;
         if (originalTarget != selectSlotItem) {
             SKSE::log::critical(
-                "IED runtime hook: call target mismatch (expected RVA 0x{:X})",
+                "IED transparent shim: call target mismatch (expected RVA 0x{:X})",
                 kSelectSlotItemRva);
             return false;
         }
 
-        // A 5-byte x64 CALL can only reach +/-2 GiB. IEDSyncTogether.dll may be
-        // loaded farther away than that, so place an absolute-jump relay near
-        // IED and patch the original CALL to target the relay.
+        // A 5-byte x64 CALL can only reach +/-2 GiB. Allocate a tiny relay near
+        // IED, then make that relay tail-jump straight to the official function.
+        // No private IED ABI is re-declared or interpreted in this version.
         const auto searchCenter = callSite + kTrampolineSearchBias;
         g_iedTrampoline.create(
             64,
             reinterpret_cast<void*>(searchCenter));
 
         auto* relay = g_iedTrampoline.allocate<AbsoluteJumpRelay>();
-        relay->target = reinterpret_cast<std::uint64_t>(&SelectSlotItemHook);
+        *relay = AbsoluteJumpRelay{};
+        relay->target = static_cast<std::uint64_t>(selectSlotItem);
 
         std::int32_t relayDisplacement = 0;
         const auto relayAddress = reinterpret_cast<std::uintptr_t>(relay);
         if (!GetRelative32(callSite + sizeof(RelativeCall), relayAddress, relayDisplacement)) {
             SKSE::log::critical(
-                "IED runtime hook: allocated relay is outside rel32 range (call=0x{:X}, relay=0x{:X})",
+                "IED transparent shim: allocated relay is outside rel32 range (call=0x{:X}, relay=0x{:X})",
                 callSite,
                 relayAddress);
             return false;
         }
 
-        RelativeCall patchedCall;
+        RelativeCall patchedCall{};
         patchedCall.displacement = relayDisplacement;
-
-        // Publish the original target before the call-site is rewritten. Even
-        // though this now runs at DataLoaded, this ordering also eliminates the
-        // tiny window where another thread could enter the relay while the
-        // original function pointer is still null.
-        g_originalSelectSlotItem = reinterpret_cast<SelectSlotItemFn>(selectSlotItem);
         REL::safe_write(callSite, &patchedCall, sizeof(patchedCall));
         g_installed = true;
 
         SKSE::log::info(
-            "IED 1.7.4 runtime hook installed early: call RVA=0x{:X} SelectSlotItem RVA=0x{:X} relay=0x{:X}",
+            "IED 1.7.4 transparent shim installed: call RVA=0x{:X} -> relay=0x{:X} -> stock SelectSlotItem RVA=0x{:X}; no C++ ABI hook active",
             kSelectSlotItemCallRva,
-            kSelectSlotItemRva,
-            relayAddress);
+            relayAddress,
+            kSelectSlotItemRva);
         return true;
     }
 

@@ -29,14 +29,14 @@ namespace
 
         switch (message->type) {
         case SKSE::MessagingInterface::kDataLoaded:
-            // Install the fixed IED 1.7.4 call-site hook once, before save
-            // processing begins. The hook itself remains behaviorally dormant
-            // until SyncService::CanApplyRuntimeOverrides() reports a live
-            // remote snapshot, so startup and save loading still fall through
-            // directly to stock IED.
+            // Diagnostic v0.1.13: patch IED's fixed 1.7.4 call-site through a
+            // register/stack-transparent relay that tail-jumps straight back to
+            // stock SelectSlotItem. No C++ hook participates in the IED call ABI.
+            // If save loading remains stable, later versions can extend this relay
+            // incrementally instead of reintroducing the crashing wrapper.
             if (!IEDRuntimeHook::Install()) {
                 SKSE::log::error(
-                    "IED runtime hook unavailable; remote displayed-slot overrides will not be applied");
+                    "IED transparent shim unavailable; IED remains unmodified");
             }
             service.Start();
             break;
