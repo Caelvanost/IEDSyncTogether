@@ -12,46 +12,63 @@ namespace IEDSyncTogether
     {
         constexpr std::string_view kPapyrusClass = "IED";
         constexpr std::string_view kPluginKey = "IEDSyncTogether.esp";
+        std::atomic_bool g_firstCaptureStarted{ false };
 
         struct CaptureRequest
         {
-            explicit CaptureRequest(IEDBridge::CaptureCallback value) :
-                callback(std::move(value))
+            CaptureRequest(
+                IEDBridge::CaptureCallback value,
+                bool diagnosticValue) :
+                callback(std::move(value)),
+                diagnostic(diagnosticValue)
             {}
 
-            void Complete(std::size_t slot, RE::FormID formID)
-            {
-                IEDBridge::CaptureCallback finalCallback;
-                SlotState finalSlots{};
+            SlotState slots{};
+            IEDBridge::CaptureCallback callback;
+            bool diagnostic{ false };
+        };
 
-                {
-                    std::scoped_lock lock(mutex);
-                    if (completed[slot]) {
-                        return;
-                    }
-                    completed[slot] = true;
+        RE::BSScript::IVirtualMachine* GetVM()
+        {
+            auto* skyrimVM = RE::SkyrimVM::GetSingleton();
+            return skyrimVM && skyrimVM->impl ? skyrimVM->impl.get() : nullptr;
+        }
 
-                    if (formID != 0) {
-                        slots[slot] = MakeFormIdentity(RE::TESForm::LookupByID(formID));
-                    }
+        void DispatchCaptureSlot(
+            const std::shared_ptr<CaptureRequest>& request,
+            std::size_t slot);
 
-                    if (--remaining == 0) {
-                        finalSlots = slots;
-                        finalCallback = std::move(callback);
-                    }
-                }
-
-                if (finalCallback) {
-                    finalCallback(std::move(finalSlots));
-                }
+        void CompleteCaptureSlot(
+            const std::shared_ptr<CaptureRequest>& request,
+            std::size_t slot,
+            RE::FormID formID)
+        {
+            if (request->diagnostic) {
+                SKSE::log::debug(
+                    "First IED capture: completed slot={} form={:08X}",
+                    slot,
+                    formID);
             }
 
-            std::mutex mutex;
-            SlotState slots{};
-            std::array<bool, 19> completed{};
-            std::size_t remaining{ 19 };
-            IEDBridge::CaptureCallback callback;
-        };
+            if (formID != 0) {
+                request->slots[slot] = MakeFormIdentity(RE::TESForm::LookupByID(formID));
+            }
+
+            const auto nextSlot = slot + 1;
+            if (nextSlot < request->slots.size()) {
+                DispatchCaptureSlot(request, nextSlot);
+                return;
+            }
+
+            if (request->diagnostic) {
+                SKSE::log::info("First IED capture: all 19 slots completed sequentially");
+            }
+
+            auto callback = std::move(request->callback);
+            if (callback) {
+                callback(std::move(request->slots));
+            }
+        }
 
         class SlotResultCallback final :
             public RE::BSScript::IStackCallbackFunctor
@@ -75,12 +92,14 @@ namespace IEDSyncTogether
 
                 auto request = _request;
                 const auto slot = _slot;
+                auto complete = [request = std::move(request), slot, formID]() {
+                    CompleteCaptureSlot(request, slot, formID);
+                };
+
                 if (auto* tasks = SKSE::GetTaskInterface()) {
-                    tasks->AddTask([request = std::move(request), slot, formID]() {
-                        request->Complete(slot, formID);
-                    });
+                    tasks->AddTask(std::move(complete));
                 } else {
-                    request->Complete(slot, 0);
+                    complete();
                 }
             }
 
@@ -96,10 +115,49 @@ namespace IEDSyncTogether
             RE::BSTSmartPointer<RE::BSScript::Object> _object;
         };
 
-        RE::BSScript::IVirtualMachine* GetVM()
+        void DispatchCaptureSlot(
+            const std::shared_ptr<CaptureRequest>& request,
+            std::size_t slot)
         {
-            auto* skyrimVM = RE::SkyrimVM::GetSingleton();
-            return skyrimVM && skyrimVM->impl ? skyrimVM->impl.get() : nullptr;
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            auto* vm = GetVM();
+            if (!player || !vm || slot >= request->slots.size()) {
+                CompleteCaptureSlot(request, slot, 0);
+                return;
+            }
+
+            if (request->diagnostic) {
+                SKSE::log::debug("First IED capture: sequential dispatch begin slot={}", slot);
+            }
+
+            RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> result(
+                new SlotResultCallback(request, slot));
+
+            const bool dispatched = vm->DispatchStaticCall(
+                RE::BSFixedString(kPapyrusClass.data()),
+                RE::BSFixedString("GetSlottedForm"),
+                RE::MakeFunctionArguments(
+                    static_cast<RE::Actor*>(player),
+                    static_cast<std::int32_t>(slot)),
+                result);
+
+            if (request->diagnostic) {
+                SKSE::log::debug(
+                    "First IED capture: sequential dispatch end slot={} dispatched={}",
+                    slot,
+                    dispatched ? 1 : 0);
+            }
+
+            if (!dispatched) {
+                auto complete = [request, slot]() {
+                    CompleteCaptureSlot(request, slot, 0);
+                };
+                if (auto* tasks = SKSE::GetTaskInterface()) {
+                    tasks->AddTask(std::move(complete));
+                } else {
+                    complete();
+                }
+            }
         }
     }
 
@@ -122,23 +180,20 @@ namespace IEDSyncTogether
             return false;
         }
 
-        auto request = std::make_shared<CaptureRequest>(std::move(callback));
-        for (std::size_t slot = 0; slot < request->slots.size(); ++slot) {
-            RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> result(
-                new SlotResultCallback(request, slot));
-
-            const bool dispatched = vm->DispatchStaticCall(
-                RE::BSFixedString(kPapyrusClass.data()),
-                RE::BSFixedString("GetSlottedForm"),
-                RE::MakeFunctionArguments(
-                    static_cast<RE::Actor*>(player),
-                    static_cast<std::int32_t>(slot)),
-                result);
-
-            if (!dispatched) {
-                request->Complete(slot, 0);
-            }
+        // Diagnostic safety mode: capture and LAN state exchange are exercised
+        // with stock IED completely unpatched. This isolates the capture/network
+        // path from the runtime SelectSlotItem hook.
+        const bool diagnostic = !g_firstCaptureStarted.exchange(true);
+        if (diagnostic) {
+            SKSE::log::info(
+                "First IED capture: runtime hook disabled for capture-path validation; starting sequential 19-slot capture player={:08X}",
+                player->GetFormID());
         }
+
+        auto request = std::make_shared<CaptureRequest>(
+            std::move(callback),
+            diagnostic);
+        DispatchCaptureSlot(request, 0);
         return true;
     }
 

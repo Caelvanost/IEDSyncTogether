@@ -1,8 +1,6 @@
 param(
     [string]$VcpkgRoot = $env:VCPKG_ROOT,
-    [string]$Configuration = "Release",
-    [string]$IedSourceRoot = $env:IED_SOURCE_ROOT,
-    [string]$PatchedIedDll = ""
+    [string]$Configuration = "Release"
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,10 +10,14 @@ $BuildRoot = Join-Path $ProjectRoot "build"
 $PackageRoot = Join-Path $ProjectRoot "package"
 $PluginRoot = Join-Path $PackageRoot "Data\SKSE\Plugins"
 $ConfigSource = Join-Path $ProjectRoot "config\IEDSyncTogether.ini"
-$IedBuildScript = Join-Path $ProjectRoot "build-ied-patched.ps1"
-$BundledPatchedIedDll = Join-Path $ProjectRoot "third-party\IED-1.7.4\ImmersiveEquipmentDisplays.dll"
-$IedLicenseSource = Join-Path $ProjectRoot "third-party\IED-LICENSE.txt"
-$IedLicenseDestination = Join-Path $PackageRoot "Data\IEDSyncTogether\licenses\IED-LICENSE.txt"
+$CMakeLists = Join-Path $ProjectRoot "CMakeLists.txt"
+
+$CMakeText = Get-Content -LiteralPath $CMakeLists -Raw
+$VersionMatch = [regex]::Match($CMakeText, 'VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)')
+if (-not $VersionMatch.Success) {
+    throw "Impossible de determiner la version du projet depuis CMakeLists.txt"
+}
+$ProjectVersion = $VersionMatch.Groups[1].Value
 
 if (-not $VcpkgRoot) {
     $VcpkgRoot = "C:\dev\vcpkg"
@@ -24,6 +26,13 @@ if (-not $VcpkgRoot) {
 $Toolchain = Join-Path $VcpkgRoot "scripts\buildsystems\vcpkg.cmake"
 if (-not (Test-Path -LiteralPath $Toolchain)) {
     throw "Toolchain vcpkg introuvable: $Toolchain"
+}
+
+Write-Host "Nettoyage des dossiers build et package..." -ForegroundColor Cyan
+foreach ($path in @($BuildRoot, $PackageRoot)) {
+    if (Test-Path -LiteralPath $path) {
+        Remove-Item -LiteralPath $path -Recurse -Force
+    }
 }
 
 function Write-Subrecord {
@@ -107,57 +116,15 @@ if (-not $dll) {
     throw "IEDSyncTogether.dll est introuvable apres compilation."
 }
 
-if (-not $PatchedIedDll) {
-    if (Test-Path -LiteralPath $BundledPatchedIedDll -PathType Leaf) {
-        $PatchedIedDll = $BundledPatchedIedDll
-        Write-Host "Utilisation du DLL IED 1.7.4 patche precompile: $PatchedIedDll" -ForegroundColor Cyan
-    } else {
-        $PatchedIedDll = Join-Path $BuildRoot "ied-patched\ImmersiveEquipmentDisplays.dll"
-
-        if (-not (Test-Path -LiteralPath $PatchedIedDll -PathType Leaf)) {
-            if (-not (Test-Path -LiteralPath $IedBuildScript -PathType Leaf)) {
-                throw "Script de build IED patche introuvable: $IedBuildScript"
-            }
-
-            $iedArgs = @{}
-            if ($IedSourceRoot) {
-                $iedArgs.IedSourceRoot = $IedSourceRoot
-            }
-
-            & $IedBuildScript @iedArgs
-            if ($LASTEXITCODE -ne 0) {
-                throw "La compilation d'IED 1.7.4 patche a echoue."
-            }
-        }
-    }
-}
-
-if (-not (Test-Path -LiteralPath $PatchedIedDll -PathType Leaf)) {
-    throw "ImmersiveEquipmentDisplays.dll patche introuvable: $PatchedIedDll"
-}
-$PatchedIedDll = (Resolve-Path -LiteralPath $PatchedIedDll).Path
-
-if (-not (Test-Path -LiteralPath $IedLicenseSource -PathType Leaf)) {
-    throw "Licence IED introuvable: $IedLicenseSource"
-}
-
-if (Test-Path -LiteralPath $PackageRoot) {
-    Remove-Item -LiteralPath $PackageRoot -Recurse -Force
-}
-
 New-Item -ItemType Directory -Force -Path $PluginRoot | Out-Null
 Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $PluginRoot "IEDSyncTogether.dll") -Force
 Copy-Item -LiteralPath $ConfigSource -Destination (Join-Path $PluginRoot "IEDSyncTogether.ini") -Force
-Copy-Item -LiteralPath $PatchedIedDll -Destination (Join-Path $PluginRoot "ImmersiveEquipmentDisplays.dll") -Force
 Write-MinimalPlugin (Join-Path $PackageRoot "Data\IEDSyncTogether.esp")
-
-New-Item -ItemType Directory -Force -Path (Split-Path -Parent $IedLicenseDestination) | Out-Null
-Copy-Item -LiteralPath $IedLicenseSource -Destination $IedLicenseDestination -Force
 
 $DistRoot = Join-Path $ProjectRoot "dist"
 New-Item -ItemType Directory -Force -Path $DistRoot | Out-Null
 
-$Archive = Join-Path $DistRoot "IEDSyncTogether-v0.1.0.zip"
+$Archive = Join-Path $DistRoot "IEDSyncTogether-v$ProjectVersion.zip"
 if (Test-Path -LiteralPath $Archive) {
     Remove-Item -LiteralPath $Archive -Force
 }
@@ -170,19 +137,21 @@ try {
     foreach ($required in @(
         "Data/SKSE/Plugins/IEDSyncTogether.dll",
         "Data/SKSE/Plugins/IEDSyncTogether.ini",
-        "Data/SKSE/Plugins/ImmersiveEquipmentDisplays.dll",
-        "Data/IEDSyncTogether.esp",
-        "Data/IEDSyncTogether/licenses/IED-LICENSE.txt"
+        "Data/IEDSyncTogether.esp"
     )) {
         if ($entries -notcontains $required) {
             throw "Entree absente de l'archive: $required"
         }
+    }
+
+    if ($entries -contains "Data/SKSE/Plugins/ImmersiveEquipmentDisplays.dll") {
+        throw "Le package ne doit pas contenir ImmersiveEquipmentDisplays.dll: le hook utilise le DLL IED 1.7.4 officiel installe separement."
     }
 } finally {
     $zip.Dispose()
 }
 
 Write-Host ""
-Write-Host "Package Vortex complet cree:" -ForegroundColor Green
+Write-Host "Package Vortex cree:" -ForegroundColor Green
 Write-Host $Archive
-Write-Host "Inclut ImmersiveEquipmentDisplays.dll 1.7.4 patche pour IEDSyncTogether." -ForegroundColor Green
+Write-Host "IED 1.7.4 officiel reste une dependance separee; aucun DLL IED modifie n'est inclus." -ForegroundColor Green

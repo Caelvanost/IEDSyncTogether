@@ -24,13 +24,26 @@ namespace
     void OnSKSEMessage(SKSE::MessagingInterface::Message* message)
     {
         using namespace IEDSyncTogether;
+        auto& service = SyncService::GetSingleton();
+
         switch (message->type) {
         case SKSE::MessagingInterface::kDataLoaded:
-            SyncService::GetSingleton().Start();
+            // Do not patch IED while Skyrim is starting or loading a save.
+            // The runtime hook is installed lazily only after a LAN peer has
+            // been matched to a dynamic remote-player actor.
+            service.Start();
             break;
+
         case SKSE::MessagingInterface::kPreLoadGame:
-            SyncService::GetSingleton().Reset();
+            service.SetGameLoaded(false);
+            service.Reset();
             break;
+
+        case SKSE::MessagingInterface::kPostLoadGame:
+        case SKSE::MessagingInterface::kNewGame:
+            service.SetGameLoaded(true);
+            break;
+
         default:
             break;
         }
@@ -41,7 +54,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
     InitializeLogging();
     SKSE::Init(skse);
-    SKSE::log::info("IEDSyncTogether v0.1.0 loading");
+    SKSE::log::info("IEDSyncTogether v{} loading", IEDST_VERSION_STRING);
 
     auto* messaging = SKSE::GetMessagingInterface();
     if (!messaging) {
