@@ -25,6 +25,7 @@ namespace IEDSyncTogether
     private:
         struct RemoteSnapshot
         {
+            std::string characterName;
             SlotState slots{};
             std::uint64_t revision{ 0 };
             RE::FormID lastProxy{ 0 };
@@ -33,7 +34,15 @@ namespace IEDSyncTogether
         struct KnownPeer
         {
             std::string name;
+            RE::FormID currentProxy{ 0 };
             std::chrono::steady_clock::time_point lastSeen{};
+        };
+
+        struct PeerBinding
+        {
+            std::string id;
+            std::string name;
+            RE::FormID proxyFormID{ 0 };
         };
 
         SyncService() = default;
@@ -44,20 +53,18 @@ namespace IEDSyncTogether
         void TimerLoop(std::stop_token token);
         void Tick();
         void OnLocalCapture(SlotState slots);
-        void UpdateSTRSessionState(const std::vector<RE::Actor*>& proxies);
+        void UpdateSTRSessionState(const std::vector<PeerBinding>& bindings);
         void SuspendSTRSession();
-        void RefreshProxyMitigation(const std::vector<RE::Actor*>& proxies);
-        void LogRemoteResolution(std::string_view sender, RemoteSnapshot& snapshot);
+        void RefreshProxyMitigation(const std::vector<PeerBinding>& bindings);
         void SendReadyHeartbeat();
         void HandleReadyPacket(std::string_view packet);
         void ExpireKnownPeers();
         void ClearKnownPeers();
-        std::vector<std::string> SnapshotKnownPeerNames() const;
+        std::vector<PeerBinding> RefreshPeerBindings();
 
         static std::optional<std::string> ReadField(
             std::string_view packet,
             std::string_view key);
-        static std::string NormalizeName(std::string_view name);
 
         Config _config{};
         std::jthread _timer;
