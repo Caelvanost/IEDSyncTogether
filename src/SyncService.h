@@ -25,6 +25,7 @@ namespace IEDSyncTogether
         {
             SlotState slots{};
             std::uint64_t revision{ 0 };
+            std::string characterName;
             RE::FormID lastProxy{ 0 };
         };
 
@@ -38,12 +39,10 @@ namespace IEDSyncTogether
         void OnLocalCapture(SlotState slots);
         void SendNetworkPayload(std::string_view payload);
         void RefreshProxyMitigation();
-        void LogRemoteResolution(std::string_view sender, RemoteSnapshot& snapshot);
 
         static std::optional<std::string> ReadField(
             std::string_view packet,
             std::string_view key);
-        static std::string NormalizeName(std::string_view name);
 
         Config _config{};
         std::jthread _timer;
