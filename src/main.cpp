@@ -1,5 +1,6 @@
 #include "PCH.h"
 
+#include "IEDRuntimeHook.h"
 #include "IEDSyncTogether/Interface.h"
 #include "SyncService.h"
 
@@ -28,9 +29,15 @@ namespace
 
         switch (message->type) {
         case SKSE::MessagingInterface::kDataLoaded:
-            // Do not patch IED while Skyrim is starting or loading a save.
-            // The runtime hook is installed lazily only after a LAN peer has
-            // been matched to a dynamic remote-player actor.
+            // Install the fixed IED 1.7.4 call-site hook once, before save
+            // processing begins. The hook itself remains behaviorally dormant
+            // until SyncService::CanApplyRuntimeOverrides() reports a live
+            // remote snapshot, so startup and save loading still fall through
+            // directly to stock IED.
+            if (!IEDRuntimeHook::Install()) {
+                SKSE::log::error(
+                    "IED runtime hook unavailable; remote displayed-slot overrides will not be applied");
+            }
             service.Start();
             break;
 
