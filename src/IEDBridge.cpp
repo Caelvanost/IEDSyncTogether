@@ -1,6 +1,5 @@
 #include "PCH.h"
 #include "IEDBridge.h"
-#include "IEDRuntimeHook.h"
 
 #include <RE/F/FunctionArguments.h>
 #include <RE/I/IStackCallbackFunctor.h>
@@ -181,22 +180,13 @@ namespace IEDSyncTogether
             return false;
         }
 
-        // Keep stock IED completely untouched during startup/save loading and
-        // while the player is alone. The hook becomes necessary only once the
-        // sync service has already matched a LAN peer to a remote actor and is
-        // about to capture its first authoritative local state.
-        if (!IEDRuntimeHook::IsInstalled()) {
-            SKSE::log::info("Remote session ready; installing IED runtime hook lazily before first capture");
-            if (!IEDRuntimeHook::Install()) {
-                SKSE::log::critical("IED capture aborted: IED 1.7.4 runtime hook installation failed");
-                return false;
-            }
-        }
-
+        // Diagnostic safety mode: capture and LAN state exchange are exercised
+        // with stock IED completely unpatched. This isolates the capture/network
+        // path from the runtime SelectSlotItem hook.
         const bool diagnostic = !g_firstCaptureStarted.exchange(true);
         if (diagnostic) {
             SKSE::log::info(
-                "First IED capture: starting sequential 19-slot capture player={:08X}",
+                "First IED capture: runtime hook disabled for capture-path validation; starting sequential 19-slot capture player={:08X}",
                 player->GetFormID());
         }
 
