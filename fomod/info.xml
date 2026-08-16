@@ -2,6 +2,6 @@
 <fomod>
   <Name>IEDSyncTogether</Name>
   <Author>Caelvanost</Author>
-  <Version>0.3.1</Version>
-  <Description>Synchronizes Immersive Equipment Displays slot state between Skyrim Together players through STR Plugin Messaging; no IEDSyncTogether port forwarding is needed by default.</Description>
+  <Version>0.3.3</Version>
+  <Description>Synchronizes Immersive Equipment Displays between Skyrim Together players. Choose Host or Client in the FOMOD; the UDP endpoint and HMAC shared secret are derived automatically from the Skyrim Together connection and server password.</Description>
 </fomod>
