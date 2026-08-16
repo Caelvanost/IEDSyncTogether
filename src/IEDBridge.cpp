@@ -1,5 +1,6 @@
 #include "PCH.h"
 #include "IEDBridge.h"
+#include "IEDRuntimeHook.h"
 
 #include <RE/F/FunctionArguments.h>
 #include <RE/I/IStackCallbackFunctor.h>
@@ -178,6 +179,18 @@ namespace IEDSyncTogether
         auto* vm = GetVM();
         if (!player || !vm || !callback || !IsInstalled()) {
             return false;
+        }
+
+        // Keep stock IED completely untouched during startup/save loading and
+        // while the player is alone. The hook becomes necessary only once the
+        // sync service has already matched a LAN peer to a remote actor and is
+        // about to capture its first authoritative local state.
+        if (!IEDRuntimeHook::IsInstalled()) {
+            SKSE::log::info("Remote session ready; installing IED runtime hook lazily before first capture");
+            if (!IEDRuntimeHook::Install()) {
+                SKSE::log::critical("IED capture aborted: IED 1.7.4 runtime hook installation failed");
+                return false;
+            }
         }
 
         const bool diagnostic = !g_firstCaptureStarted.exchange(true);
