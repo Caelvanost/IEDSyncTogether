@@ -59,8 +59,9 @@ namespace IEDSyncTogether
         _gameLoaded.store(false);
         _strConnected.store(false);
         _remotePlayersAvailable.store(false);
-        _proxyScanPending.store(false);
         _capturePending.store(false);
+        _lastReadySend = {};
+        ClearKnownPeers();
         _config = Config::Load();
         if (!IEDBridge::GetSingleton().IsInstalled()) {
             SKSE::log::critical("Immersive Equipment Displays is not loaded");
@@ -82,7 +83,7 @@ namespace IEDSyncTogether
 
         _timer = std::jthread([this](std::stop_token token) { TimerLoop(token); });
         SKSE::log::info(
-            "Service started dormant: STR remote players will be validated through SkyrimTogetherUtils.IsRemotePlayer; capture={}ms suppressRemoteNpcDisplays={}",
+            "Service started dormant: remote proxies are matched by IED peer character name; no STR Papyrus calls; capture={}ms suppressRemoteNpcDisplays={}",
             _config.captureIntervalMs,
             _config.suppressRemoteNpcDisplays ? 1 : 0);
     }
@@ -91,6 +92,7 @@ namespace IEDSyncTogether
     {
         _gameLoaded.store(false);
         SuspendSTRSession();
+        ClearKnownPeers();
         if (!_running.exchange(false)) {
             return;
         }
@@ -105,6 +107,7 @@ namespace IEDSyncTogether
     {
         _gameLoaded.store(false);
         SuspendSTRSession();
+        ClearKnownPeers();
     }
 
     void SyncService::SetGameLoaded(bool loaded) noexcept
@@ -112,21 +115,21 @@ namespace IEDSyncTogether
         _gameLoaded.store(loaded);
         if (!loaded) {
             SuspendSTRSession();
+            ClearKnownPeers();
             SKSE::log::info("Game unloaded; STR/IED synchronization suspended");
             return;
         }
 
+        _lastReadySend = {};
         SKSE::log::info(
-            "Game loaded; waiting for an STR-verified remote player before enabling IED synchronization");
+            "Game loaded; waiting for an IED peer name to match a dynamic STR proxy before enabling synchronization");
     }
 
     void SyncService::SuspendSTRSession()
     {
         _strConnected.store(false);
         _remotePlayersAvailable.store(false);
-        _proxyScanPending.store(false);
         _capturePending.store(false);
-        ClearRemotePlayerProxyCache();
         _blockedProxies.clear();
         {
             std::scoped_lock lock(_snapshotMutex);
@@ -152,11 +155,11 @@ namespace IEDSyncTogether
             _hasLocalSlots = false;
             _lastSend = {};
             SKSE::log::info(
-                "STR session verified: {} remote player proxy/proxies confirmed by SkyrimTogetherUtils.IsRemotePlayer; enabling IED synchronization",
+                "STR proxy matched safely by IED peer name: {} remote player proxy/proxies; enabling IED synchronization",
                 proxies.size());
         } else {
             SKSE::log::info(
-                "No STR-verified remote players remain; suspending IED synchronization");
+                "No dynamic actor matches an active IED peer name; suspending IED synchronization");
             SuspendSTRSession();
         }
     }
@@ -196,45 +199,106 @@ namespace IEDSyncTogether
         }
     }
 
+    void SyncService::SendReadyHeartbeat()
+    {
+        if (!_config.networkEnabled) {
+            return;
+        }
+
+        auto& transport = UdpTransport::GetSingleton();
+        if (!transport.IsRunning()) {
+            return;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto interval = std::chrono::milliseconds(
+            std::max<std::uint32_t>(_config.discoveryIntervalMs, 500));
+        if (_lastReadySend != std::chrono::steady_clock::time_point{} &&
+            now - _lastReadySend < interval) {
+            return;
+        }
+
+        const auto playerName = transport.GetLocalPlayerName();
+        transport.Send(fmt::format(
+            "READY|from={}",
+            HexEncode(playerName)));
+        _lastReadySend = now;
+    }
+
+    void SyncService::HandleReadyPacket(std::string_view packet)
+    {
+        const auto instanceID = ReadField(packet, "id");
+        const auto encodedName = ReadField(packet, "from");
+        const auto playerName = encodedName ? HexDecode(*encodedName) : std::nullopt;
+        if (!instanceID || !playerName || playerName->empty()) {
+            return;
+        }
+
+        bool changed = false;
+        {
+            std::scoped_lock lock(_peerStateMutex);
+            auto& peer = _knownPeers[*instanceID];
+            changed = peer.name != *playerName;
+            peer.name = *playerName;
+            peer.lastSeen = std::chrono::steady_clock::now();
+        }
+
+        if (changed) {
+            SKSE::log::info(
+                "IED peer ready: player=\"{}\"; waiting for a dynamic actor with the same name",
+                *playerName);
+        }
+    }
+
+    void SyncService::ExpireKnownPeers()
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const auto timeout = std::chrono::milliseconds(_config.peerTimeoutMs);
+        std::scoped_lock lock(_peerStateMutex);
+        for (auto iterator = _knownPeers.begin(); iterator != _knownPeers.end();) {
+            if (now - iterator->second.lastSeen > timeout) {
+                iterator = _knownPeers.erase(iterator);
+            } else {
+                ++iterator;
+            }
+        }
+    }
+
+    void SyncService::ClearKnownPeers()
+    {
+        std::scoped_lock lock(_peerStateMutex);
+        _knownPeers.clear();
+    }
+
+    std::vector<std::string> SyncService::SnapshotKnownPeerNames() const
+    {
+        std::vector<std::string> result;
+        std::unordered_set<std::string> seen;
+        std::scoped_lock lock(_peerStateMutex);
+        for (const auto& [instanceID, peer] : _knownPeers) {
+            (void)instanceID;
+            if (peer.name.empty()) {
+                continue;
+            }
+            const auto normalized = NormalizeName(peer.name);
+            if (seen.insert(normalized).second) {
+                result.push_back(peer.name);
+            }
+        }
+        return result;
+    }
+
     void SyncService::Tick()
     {
         if (!_running.load() || !_gameLoaded.load()) {
             return;
         }
 
-        bool expected = false;
-        if (!_proxyScanPending.compare_exchange_strong(expected, true)) {
-            return;
-        }
+        SendReadyHeartbeat();
+        ExpireKnownPeers();
 
-        // The 0xFFxxxxxx check in ProxyResolver is now only a cheap candidate
-        // filter. STR itself authoritatively classifies each candidate through
-        // SkyrimTogetherUtils.IsRemotePlayer before this service can activate.
-        const bool requested = RequestRemotePlayerProxyScan(
-            [this](std::vector<RE::FormID> remoteProxyIDs) {
-                OnProxyScanComplete(std::move(remoteProxyIDs));
-            });
-
-        if (!requested) {
-            _proxyScanPending.store(false);
-        }
-    }
-
-    void SyncService::OnProxyScanComplete(std::vector<RE::FormID> remoteProxyIDs)
-    {
-        _proxyScanPending.store(false);
-        if (!_running.load() || !_gameLoaded.load()) {
-            return;
-        }
-
-        auto proxies = FindRemotePlayerProxies();
-        if (proxies.size() != remoteProxyIDs.size()) {
-            SKSE::log::debug(
-                "STR proxy validation resolved {}/{} verified actor(s) still present",
-                proxies.size(),
-                remoteProxyIDs.size());
-        }
-
+        const auto peerNames = SnapshotKnownPeerNames();
+        const auto proxies = FindRemotePlayerProxies(peerNames);
         UpdateSTRSessionState(proxies);
         if (!_strConnected.load() || !_remotePlayersAvailable.load()) {
             return;
@@ -308,13 +372,20 @@ namespace IEDSyncTogether
 
     void SyncService::HandlePacket(std::string packet)
     {
-        if (!_gameLoaded.load() ||
-            !_strConnected.load() ||
-            !_remotePlayersAvailable.load()) {
+        if (!_gameLoaded.load() || !packet.starts_with(kGameplayPrefix)) {
             return;
         }
 
-        if (!packet.starts_with(kGameplayPrefix) || packet.find("|STATE|") == std::string::npos) {
+        if (packet.find("|READY|") != std::string::npos) {
+            HandleReadyPacket(packet);
+            return;
+        }
+
+        if (!_strConnected.load() || !_remotePlayersAvailable.load()) {
+            return;
+        }
+
+        if (packet.find("|STATE|") == std::string::npos) {
             return;
         }
 
@@ -354,8 +425,9 @@ namespace IEDSyncTogether
     {
         auto* proxy = FindRemotePlayerProxy(sender);
         if (!proxy) {
+            snapshot.lastProxy = 0;
             SKSE::log::info(
-                "Remote IED state waiting for verified proxy: player=\"{}\" revision={}",
+                "Remote IED state waiting for name-matched proxy: player=\"{}\" revision={}",
                 sender,
                 snapshot.revision);
             return;
@@ -375,7 +447,7 @@ namespace IEDSyncTogether
         }
 
         SKSE::log::info(
-            "Remote IED state matched: player=\"{}\" proxy={:08X} revision={} slots={}/{} adapter=str-verified",
+            "Remote IED state matched: player=\"{}\" proxy={:08X} revision={} slots={}/{} adapter=peer-name",
             sender,
             proxy->GetFormID(),
             snapshot.revision,
@@ -397,7 +469,7 @@ namespace IEDSyncTogether
                 IEDBridge::GetSingleton().SetActorBlocked(proxy, true);
                 const auto* proxyName = proxy->GetName();
                 SKSE::log::info(
-                    "Suppressed IED NPC display on verified STR proxy {:08X} \"{}\"",
+                    "Suppressed IED NPC display on name-matched proxy {:08X} \"{}\"",
                     proxy->GetFormID(),
                     proxyName ? proxyName : "");
             }
@@ -438,16 +510,9 @@ namespace IEDSyncTogether
             return static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kNotRemote);
         }
 
-        {
-            std::scoped_lock lock(_snapshotMutex);
-            if (_remoteSnapshots.empty()) {
-                return static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kNotRemote);
-            }
-        }
-
         auto* form = RE::TESForm::LookupByID(actorFormID);
         auto* actor = form ? form->As<RE::Actor>() : nullptr;
-        if (!IsVerifiedRemotePlayerProxy(actor)) {
+        if (!IsDynamicActorCandidate(actor)) {
             return static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kNotRemote);
         }
 
@@ -460,7 +525,8 @@ namespace IEDSyncTogether
         {
             std::scoped_lock lock(_snapshotMutex);
             const auto iterator = _remoteSnapshots.find(NormalizeName(name));
-            if (iterator == _remoteSnapshots.end()) {
+            if (iterator == _remoteSnapshots.end() ||
+                iterator->second.lastProxy != actorFormID) {
                 return static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kNotRemote);
             }
             identity = iterator->second.slots[slotIndex];
