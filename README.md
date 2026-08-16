@@ -1,179 +1,89 @@
 # IEDSyncTogether
 
-Compatibility and synchronization layer between
-[Immersive Equipment Displays](https://www.nexusmods.com/skyrimspecialedition/mods/62001)
-and Skyrim Together Reborn.
+Compatibility and synchronization layer between Immersive Equipment Displays (IED) and Skyrim Together Reborn (STR).
 
-## Problem
+## Target behavior
 
-Skyrim Together represents remote players as dynamically created `Actor`
-proxies. IED therefore applies its NPC rules to them. In particular, the
-player-only favorite check is not applied, which can make every compatible
-item in the remote inventory appear on the proxy.
+STR represents remote players as dynamically created actor proxies. IED normally evaluates those proxies as NPCs, so the owning player's displayed/favorited equipment is not reproduced reliably. IEDSyncTogether captures the 19 IED display slots on the owning client, exchanges stable form identities over LAN, binds the remote state to the matching STR proxy, and asks IED to render that authoritative state without changing the proxy inventory or equipment.
 
-## Intended behavior
+## v0.1.14
 
-- Detect only Skyrim Together remote-player proxies.
-- Remain dormant after loading a save until a remote STR player proxy actually appears.
-- Capture the 19 forms actually selected by IED on the owning client only while an STR session with a remote player is active.
-- Exchange stable `plugin + local FormID` identities over the LAN.
-- Reproduce that authoritative selection on the matching remote proxy.
-- Suspend capture and clear remote overrides when STR remote-player proxies disappear.
-- Never alter the real inventory or equipment managed by Skyrim Together.
-
-## Status
-
-The v0.1 prototype provides:
-
-- Skyrim Together remote-proxy detection.
-- STR-session-gated synchronization: `PostLoadGame` alone never starts IED capture.
-- Asynchronous capture of all 19 IED equipment slots after a remote STR proxy appears.
-- LAN peer discovery and UDP state exchange.
-- Stable cross-client form identities (`plugin + local FormID`).
-- An authoritative remote-slot query in IEDSyncTogether.
-- A runtime hook for the official IED 1.7.4 DLL at the slot-selection boundary.
-- Strict byte-signature checks so unsupported IED builds are rejected instead of patched blindly.
-- An opt-in fallback that hides IED-cloned gear on remote proxies.
-
-It is built for:
-
-- Skyrim Special Edition 1.6.1170
-- SKSE 2.2.6
-- Immersive Equipment Displays 1.7.4
-- Skyrim Together Reborn 1.8.0
-
-## Synchronization lifecycle
-
-Loading a Skyrim save is deliberately separate from joining Skyrim Together:
-
-```text
-DataLoaded
-    -> install IED runtime hook
-    -> start service in dormant mode
-
-PostLoadGame / NewGame
-    -> mark Skyrim world as loaded
-    -> no IED capture yet
-
-manual STR connection
-    -> remote STR player proxy appears
-    -> enable IED capture and remote overrides
-
-STR disconnect / remote proxies disappear
-    -> stop captures
-    -> discard pending remote snapshots
-    -> disable runtime overrides
-```
-
-For this prototype, the presence of at least one remote-player proxy is the
-activation signal relevant to IEDSyncTogether. This intentionally avoids
-assuming that `PostLoadGame` means STR is connected. It also means no slot
-synchronization work is performed while the player is alone and there is no
-remote actor to display.
-
-## IED 1.7.4 runtime integration
-
-Released IED 1.7.4 does not expose a public per-actor slot-override API.
-IEDSyncTogether therefore intercepts the single call to
-`IED::IEquipment::SelectSlotItem` inside `Controller::ProcessSlots`.
-
-The supported official IED 1.7.4 binary was identified from the upstream
-`SlavicPotato/ied-dev` commit:
+v0.1.14 replaces the experimental binary `SelectSlotItem` hook with a source-level bridge built against the exact IED 1.7.4 source commit:
 
 ```text
 3f014c3e8574ef0e88b2ec0b7cdf58b86c9737b0
 ```
 
-For that binary:
+The previous v0.1.13 transparent relay was intentionally a no-op and could not display remote slots. Earlier v0.1.9-v0.1.12 binary ABI experiments were also removed from the active path because they could crash during save loading.
 
-```text
-SelectSlotItem call site RVA : 0xE3806
-SelectSlotItem function RVA  : 0x146360
+The source patch now does two things for synchronized STR proxies:
+
+1. `InventoryInfoCollector` injects each authoritative remote form into IED's collector before `GenerateSlotCandidates()` runs. This is required because an STR proxy does not necessarily contain the owning player's real inventory item.
+2. `IEquipment::SelectSlotItem` selects the synchronized FormID from that generated candidate set, or leaves the slot empty when the remote state says it is empty.
+
+The synthetic collector entry is used only by IED's display pipeline. IEDSyncTogether does not add, remove, equip or unequip any gameplay item.
+
+## Required versions
+
+- Skyrim Special Edition 1.6.1170
+- SKSE 2.2.6
+- Immersive Equipment Displays 1.7.4 source-patched by this project
+- Skyrim Together Reborn 1.8.0
+
+## Building the patched IED DLL
+
+The upstream IED source patch is under `integration/ied-dev/`.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-ied-patched.ps1
 ```
 
-Before installing the hook, IEDSyncTogether validates both the original
-five-byte `CALL rel32` instruction and the `SelectSlotItem` prologue. If either
-signature differs, synchronization is disabled and an error is written to
-`IEDSyncTogether.log`.
+The patched DLL must end up at:
 
-IED remains responsible for candidate discovery, model loading, transforms,
-nodes, filters and normal selection. IEDSyncTogether only changes the selected
-candidate when the actor is a synchronized Skyrim Together remote-player proxy.
-If the synchronized form is not present in IED's locally generated candidate
-set, the authoritative slot is left empty.
+```text
+third-party/IED-1.7.4/ImmersiveEquipmentDisplays.dll
+```
 
-The official IED DLL is **not modified or bundled**. Keep the normal IED 1.7.4
-installation enabled in Vortex.
+It exports `IEDST_GetSourceBridgeVersion`; IEDSyncTogether logs the detected bridge version at `DataLoaded`.
 
-The old source-patch files under `integration/ied-dev/` and
-`build-ied-patched.ps1` are retained as development/history material; they are
-not required by the runtime-hook package.
+## Building the Vortex package
 
-## Building
-
-Set `VCPKG_ROOT` if needed, then run:
+With the patched IED DLL present, run:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build-vortex.ps1
 ```
 
-The generated archive uses the version declared in `CMakeLists.txt`, for example:
+The archive name follows `CMakeLists.txt`:
 
 ```text
-dist/IEDSyncTogether-v0.1.4.zip
+dist/IEDSyncTogether-v0.1.14.zip
 ```
 
-Expected relevant contents:
+The archive contains:
 
 ```text
 Data/IEDSyncTogether.esp
 Data/SKSE/Plugins/IEDSyncTogether.dll
 Data/SKSE/Plugins/IEDSyncTogether.ini
+Data/SKSE/Plugins/ImmersiveEquipmentDisplays.dll
 ```
 
-`ImmersiveEquipmentDisplays.dll` must **not** appear in this archive. Install
-IED 1.7.4 separately and leave its normal scripts/assets/configuration enabled.
-There is no Vortex DLL conflict to resolve between IED and IEDSyncTogether.
+For this experimental build the packaged `ImmersiveEquipmentDisplays.dll` must win the Vortex conflict against the official IED 1.7.4 DLL. Keep the rest of the official IED mod (scripts, assets and configuration) installed.
 
-## Runtime integration semantics
+## Runtime checks
 
-`IEDST_QuerySlotOverride(actorFormID, slotIndex, outFormID)` and the internal
-runtime hook use the same result contract:
-
-- `0`: actor is not a synchronized remote proxy; IED uses normal behavior.
-- `1`: authoritative slot is empty.
-- `2`: use `outFormID` if that form is present in IED's candidate set; otherwise leave the slot empty.
-
-No item is added, removed, equipped or unequipped by this integration.
-
-## Installation
-
-Install on both Skyrim Together clients:
-
-1. Immersive Equipment Displays **1.7.4** (official release).
-2. IEDSyncTogether's generated Vortex archive.
-3. Skyrim Together Reborn 1.8.0 and the normal prerequisites for the mod list.
-
-On startup, check `Documents/My Games/Skyrim Special Edition/SKSE/IEDSyncTogether.log`.
-A supported installation should contain a line similar to:
+Install the same v0.1.14 package on both STR clients. In `Documents/My Games/Skyrim Special Edition/SKSE/IEDSyncTogether.log`, a correct installation should contain:
 
 ```text
-IED 1.7.4 runtime hook installed: call RVA=0xE3806 SelectSlotItem RVA=0x146360
+IEDSyncTogether v0.1.14 loading
+IED source bridge v1 detected; binary SelectSlotItem shim is disabled
 ```
 
-After loading a save while still disconnected from STR, the log should report:
+When a remote STR player is resolved, the log should still show the LAN peer/proxy binding and remote state storage. With `SuppressRemoteNpcDisplays=0`, there must no longer be a new `Suppressed IED NPC display` line for that proxy.
 
-```text
-Game loaded; waiting for a remote Skyrim Together player before enabling IED synchronization
-```
-
-Only after another STR player becomes available should it report:
-
-```text
-STR session detected: 1 remote player proxy/proxies; enabling IED synchronization
-```
+If only one remote object appears and the log says `Remote IED state stored ... (slots=1)`, the rendering path is working and the next issue is the owning client's capture state rather than proxy rendering.
 
 ## License
 
-IEDSyncTogether is MIT licensed. Immersive Equipment Displays remains a
-separate dependency and is not redistributed by the runtime-hook package.
+IEDSyncTogether is MIT licensed. Immersive Equipment Displays remains third-party software; the source patch is maintained only as a compatibility integration for the pinned IED 1.7.4 build.

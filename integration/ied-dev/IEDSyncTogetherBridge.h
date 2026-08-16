@@ -7,6 +7,9 @@
 
 namespace IED::IEDSyncTogetherBridge
 {
+    inline constexpr std::uint32_t kBridgeVersion = 1;
+    inline constexpr std::uint32_t kSlotCount = 19;
+
     enum class SlotOverrideResult : std::uint32_t
     {
         kNotRemote = 0,

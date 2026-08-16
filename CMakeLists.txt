@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
     IEDSyncTogether
-    VERSION 0.1.13
+    VERSION 0.1.14
     LANGUAGES CXX
 )
 

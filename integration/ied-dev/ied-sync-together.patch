@@ -1,7 +1,7 @@
 diff --git a/ImmersiveEquipmentDisplays/IED/Controller/IEquipment.cpp b/ImmersiveEquipmentDisplays/IED/Controller/IEquipment.cpp
 --- a/ImmersiveEquipmentDisplays/IED/Controller/IEquipment.cpp
 +++ b/ImmersiveEquipmentDisplays/IED/Controller/IEquipment.cpp
-@@ -4,6 +4,7 @@
+@@ -4,10 +4,16 @@
  
  #include "ActorObjectHolder.h"
  #include "BipedSlotData.h"
@@ -9,7 +9,16 @@ diff --git a/ImmersiveEquipmentDisplays/IED/Controller/IEquipment.cpp b/Immersiv
  #include "IRNG.h"
  
  #include "IED/ProcessParams.h"
-@@ -45,6 +46,30 @@ namespace IED
+ 
++extern "C" __declspec(dllexport) std::uint32_t IEDST_GetSourceBridgeVersion() noexcept
++{
++	return IED::IEDSyncTogetherBridge::kBridgeVersion;
++}
++
+ namespace IED
+ {
+ 	using namespace Data;
+@@ -45,6 +51,30 @@ namespace IED
  		const ObjectEntrySlot&    a_slot) noexcept
  		-> SelectedItem
  	{
@@ -40,3 +49,61 @@ diff --git a/ImmersiveEquipmentDisplays/IED/Controller/IEquipment.cpp b/Immersiv
  		if (a_candidates.empty())
  		{
  			return {};
+diff --git a/ImmersiveEquipmentDisplays/IED/Inventory.cpp b/ImmersiveEquipmentDisplays/IED/Inventory.cpp
+--- a/ImmersiveEquipmentDisplays/IED/Inventory.cpp
++++ b/ImmersiveEquipmentDisplays/IED/Inventory.cpp
+@@ -1,6 +1,7 @@
+ #include "pch.h"
+ 
+ #include "FormCommon.h"
+ #include "Inventory.h"
++#include "Controller/IEDSyncTogetherBridge.h"
+ 
+ namespace IED
+ {
+@@ -30,6 +31,40 @@ namespace IED
+ 		{
+ 			Run(*npc, GetEntryDataList(a_actor));
+ 		}
++
++		// STR remote-player proxies do not necessarily own the inventory objects
++		// selected on the authoritative client. Materialize each synchronized form
++		// in this collector before GenerateSlotCandidates() builds pointer-backed
++		// candidates, so SelectSlotItem can safely select the remote form.
++		for (std::uint32_t slotIndex = 0;
++		     slotIndex < IEDSyncTogetherBridge::kSlotCount;
++		     ++slotIndex)
++		{
++			std::uint32_t remoteFormID = 0;
++			if (IEDSyncTogetherBridge::QuerySlot(
++					a_actor->formID,
++					slotIndex,
++					remoteFormID) != IEDSyncTogetherBridge::SlotOverrideResult::kForm ||
++				remoteFormID == 0)
++			{
++				continue;
++			}
++
++			const auto* const baseForm = LookupFormByID(remoteFormID);
++			auto* const form = baseForm ? DYNAMIC_CAST(baseForm, TESForm, TESBoundObject) : nullptr;
++			if (!form)
++			{
++				continue;
++			}
++
++			auto& entry = data.forms.try_emplace(
++					form->formID,
++					form,
++					[f = form]() noexcept [[msvc::forceinline]] {
++						return ItemData::GetItemTypePair(f);
++					}).first->second;
++
++			++entry.itemCount;
++			++entry.sharedCount;
++			entry.extra.flags.set(CollectorData::ItemFlags::kFavorite);
++		}
++
++		PostProcess();
+ 	}
+ 
+ 	void InventoryInfoCollector::Run(

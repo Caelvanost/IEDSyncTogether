@@ -1,6 +1,6 @@
 #include "PCH.h"
 
-#include "IEDRuntimeHook.h"
+#include "IEDBridge.h"
 #include "IEDSyncTogether/Interface.h"
 #include "SyncService.h"
 
@@ -29,17 +29,20 @@ namespace
 
         switch (message->type) {
         case SKSE::MessagingInterface::kDataLoaded:
-            // Diagnostic v0.1.13: patch IED's fixed 1.7.4 call-site through a
-            // register/stack-transparent relay that tail-jumps straight back to
-            // stock SelectSlotItem. No C++ hook participates in the IED call ABI.
-            // If save loading remains stable, later versions can extend this relay
-            // incrementally instead of reintroducing the crashing wrapper.
-            if (!IEDRuntimeHook::Install()) {
-                SKSE::log::error(
-                    "IED transparent shim unavailable; IED remains unmodified");
+        {
+            const auto bridgeVersion = IEDBridge::GetSingleton().GetSourceBridgeVersion();
+            if (bridgeVersion == 0) {
+                SKSE::log::critical(
+                    "IED source bridge is unavailable. Install the IEDSyncTogether-patched ImmersiveEquipmentDisplays 1.7.4 DLL from the v{} package.",
+                    IEDST_VERSION_STRING);
+            } else {
+                SKSE::log::info(
+                    "IED source bridge v{} detected; binary SelectSlotItem shim is disabled",
+                    bridgeVersion);
             }
             service.Start();
             break;
+        }
 
         case SKSE::MessagingInterface::kPreLoadGame:
             service.SetGameLoaded(false);
