@@ -84,7 +84,7 @@ diff --git a/ImmersiveEquipmentDisplays/IED/Inventory.cpp b/ImmersiveEquipmentDi
 +				continue;
 +			}
 +
-+			const auto* const baseForm = LookupFormByID(remoteFormID);
++			auto* const baseForm = LookupFormByID(remoteFormID);
 +			auto* const form = baseForm ? DYNAMIC_CAST(baseForm, TESForm, TESBoundObject) : nullptr;
 +			if (!form)
 +			{
