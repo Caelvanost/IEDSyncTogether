@@ -30,6 +30,12 @@ namespace IEDSyncTogether
             RE::FormID lastProxy{ 0 };
         };
 
+        struct KnownPeer
+        {
+            std::string name;
+            std::chrono::steady_clock::time_point lastSeen{};
+        };
+
         SyncService() = default;
         ~SyncService();
         SyncService(const SyncService&) = delete;
@@ -37,12 +43,16 @@ namespace IEDSyncTogether
 
         void TimerLoop(std::stop_token token);
         void Tick();
-        void OnProxyScanComplete(std::vector<RE::FormID> remoteProxyIDs);
         void OnLocalCapture(SlotState slots);
         void UpdateSTRSessionState(const std::vector<RE::Actor*>& proxies);
         void SuspendSTRSession();
         void RefreshProxyMitigation(const std::vector<RE::Actor*>& proxies);
         void LogRemoteResolution(std::string_view sender, RemoteSnapshot& snapshot);
+        void SendReadyHeartbeat();
+        void HandleReadyPacket(std::string_view packet);
+        void ExpireKnownPeers();
+        void ClearKnownPeers();
+        std::vector<std::string> SnapshotKnownPeerNames() const;
 
         static std::optional<std::string> ReadField(
             std::string_view packet,
@@ -55,14 +65,16 @@ namespace IEDSyncTogether
         std::atomic_bool _gameLoaded{ false };
         std::atomic_bool _strConnected{ false };
         std::atomic_bool _remotePlayersAvailable{ false };
-        std::atomic_bool _proxyScanPending{ false };
         std::atomic_bool _capturePending{ false };
         SlotState _localSlots{};
         bool _hasLocalSlots{ false };
         std::uint64_t _revision{ 0 };
         std::chrono::steady_clock::time_point _lastSend{};
+        std::chrono::steady_clock::time_point _lastReadySend{};
         mutable std::mutex _snapshotMutex;
         std::unordered_map<std::string, RemoteSnapshot> _remoteSnapshots;
         std::unordered_set<RE::FormID> _blockedProxies;
+        mutable std::mutex _peerStateMutex;
+        std::unordered_map<std::string, KnownPeer> _knownPeers;
     };
 }
