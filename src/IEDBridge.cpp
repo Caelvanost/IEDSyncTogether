@@ -236,6 +236,9 @@ namespace IEDSyncTogether
                 auto* form = RE::TESForm::LookupByID(proxyFormID);
                 auto* actor = form ? form->As<RE::Actor>() : nullptr;
                 if (!actor) {
+                    std::scoped_lock lock(g_remoteMutex);
+                    g_trackedRemoteProxies.erase(proxyFormID);
+                    g_appliedRemoteStates.erase(proxyFormID);
                     continue;
                 }
 
@@ -451,11 +454,9 @@ namespace IEDSyncTogether
         if (blocked) {
             // Historical SyncService contract: "blocked" now means that this
             // resolved STR proxy is owned by our authoritative Custom Item path.
-            // Explicitly undo any block left by a v0.1.x session/save first.
-            DispatchNoResult(
-                "RemoveActorBlock",
-                static_cast<RE::Actor*>(actor),
-                std::string(kPluginKey));
+            // Clear any stale v0.1.x block or Custom Item data first, including
+            // data that may have been serialized under a reused dynamic FormID.
+            ClearRemoteCustomItems(actor);
             {
                 std::scoped_lock lock(g_remoteMutex);
                 g_trackedRemoteProxies.insert(formID);
@@ -472,5 +473,28 @@ namespace IEDSyncTogether
         }
         ClearRemoteCustomItems(actor);
         return true;
+    }
+
+    void IEDBridge::ResetRemoteRendering() const
+    {
+        std::vector<RE::FormID> proxies;
+        {
+            std::scoped_lock lock(g_remoteMutex);
+            proxies.assign(g_trackedRemoteProxies.begin(), g_trackedRemoteProxies.end());
+            g_trackedRemoteProxies.clear();
+            g_appliedRemoteStates.clear();
+        }
+
+        for (const auto formID : proxies) {
+            if (auto* form = RE::TESForm::LookupByID(formID)) {
+                if (auto* actor = form->As<RE::Actor>()) {
+                    ClearRemoteCustomItems(actor);
+                }
+            }
+        }
+
+        if (!proxies.empty()) {
+            SKSE::log::info("IED Custom Item renderer reset: cleared {} tracked proxy/proxies", proxies.size());
+        }
     }
 }

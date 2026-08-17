@@ -20,6 +20,7 @@ namespace IEDSyncTogether
         // registers the STR proxy for authoritative Custom Item rendering; false
         // unregisters it and removes IEDSyncTogether-owned Custom Items.
         bool SetActorBlocked(RE::Actor* actor, bool blocked) const;
+        void ResetRemoteRendering() const;
 
     private:
         IEDBridge() = default;

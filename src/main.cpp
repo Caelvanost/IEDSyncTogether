@@ -1,5 +1,6 @@
 #include "PCH.h"
 
+#include "IEDBridge.h"
 #include "IEDSyncTogether/Interface.h"
 #include "SyncService.h"
 
@@ -36,6 +37,9 @@ namespace
             break;
 
         case SKSE::MessagingInterface::kPreLoadGame:
+            // IED custom entries are save-persistent. Clear every proxy still
+            // owned by this runtime before the VM swaps to another save.
+            IEDBridge::GetSingleton().ResetRemoteRendering();
             service.SetGameLoaded(false);
             service.Reset();
             break;
