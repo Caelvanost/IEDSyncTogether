@@ -19,9 +19,10 @@ namespace IEDSyncTogether
         constexpr std::string_view kPluginKey = "IEDSyncTogether.esp";
         constexpr float kRadiansToDegrees = 57.29577951308232f;
 
-        // These are the actual IED/XPMSSE gear nodes corresponding to
-        // Data::ObjectSlot 0..18. Placement capture reads the current parent
-        // and local transform of these nodes after IED has evaluated the player.
+        // Capture anchors corresponding to IED Data::ObjectSlot 0..18.
+        // These are only entry points into the owner's live scene graph. v0.4.0
+        // walks through MOV/CME helper nodes and serializes the resulting
+        // transform relative to the first stable skeleton node.
         constexpr std::array<std::string_view, 19> kGearNodes{
             "WeaponSword",
             "WeaponSwordLeft",
@@ -74,6 +75,19 @@ namespace IEDSyncTogether
             return std::round(value * 10000.0f) / 10000.0f;
         }
 
+        bool IsIEDPlacementHelper(const RE::NiAVObject* node)
+        {
+            if (!node) {
+                return false;
+            }
+            const auto* value = node->name.c_str();
+            if (!value || !*value) {
+                return false;
+            }
+            const std::string_view name(value);
+            return name.starts_with("MOV ") || name.starts_with("CME ");
+        }
+
         std::optional<PlacementTransform> CapturePlacement(
             RE::PlayerCharacter* player,
             std::size_t slot)
@@ -92,27 +106,49 @@ namespace IEDSyncTogether
                 return std::nullopt;
             }
 
-            const auto* parentName = gearNode->parent->name.c_str();
-            if (!parentName || !*parentName) {
+            // Skyrim computes world = parent.world * local. Reproduce that same
+            // multiplication while walking IED/XPMSSE MOV/CME helper nodes so
+            // offsets stored on the helpers are part of the transmitted state.
+            RE::NiTransform relative = gearNode->local;
+            RE::NiAVObject* anchor = gearNode->parent;
+            std::size_t helperDepth = 0;
+            while (anchor && IsIEDPlacementHelper(anchor)) {
+                relative = anchor->local * relative;
+                anchor = anchor->parent;
+                ++helperDepth;
+            }
+
+            if (!anchor) {
+                return std::nullopt;
+            }
+            const auto* anchorName = anchor->name.c_str();
+            if (!anchorName || !*anchorName) {
                 return std::nullopt;
             }
 
             RE::NiPoint3 euler{};
-            gearNode->local.rotate.ToEulerAnglesXYZ(euler);
+            relative.rotate.ToEulerAnglesXYZ(euler);
 
             PlacementTransform result;
-            result.node = parentName;
+            result.node = anchorName;
             result.position = {
-                Quantize(gearNode->local.translate.x),
-                Quantize(gearNode->local.translate.y),
-                Quantize(gearNode->local.translate.z)
+                Quantize(relative.translate.x),
+                Quantize(relative.translate.y),
+                Quantize(relative.translate.z)
             };
             result.rotation = {
                 Quantize(euler.x * kRadiansToDegrees),
                 Quantize(euler.y * kRadiansToDegrees),
                 Quantize(euler.z * kRadiansToDegrees)
             };
-            result.scale = Quantize(std::clamp(gearNode->local.scale, 0.01f, 100.0f));
+            result.scale = Quantize(std::clamp(relative.scale, 0.01f, 100.0f));
+
+            SKSE::log::trace(
+                "IED placement chain: slot={} gearNode=\"{}\" helperDepth={} anchor=\"{}\"",
+                slot,
+                kGearNodes[slot],
+                helperDepth,
+                result.node);
             return result;
         }
 
@@ -155,10 +191,20 @@ namespace IEDSyncTogether
 
         void ClearRemoteCustomItems(RE::Actor* actor)
         {
-            if (!actor) return;
-            DispatchNoResult("RemoveActorBlock", static_cast<RE::Actor*>(actor), std::string(kPluginKey));
-            DispatchNoResult("DeleteAllActor", static_cast<RE::Actor*>(actor), std::string(kPluginKey));
-            DispatchNoResult("Evaluate", static_cast<RE::Actor*>(actor));
+            if (!actor) {
+                return;
+            }
+            DispatchNoResult(
+                "RemoveActorBlock",
+                static_cast<RE::Actor*>(actor),
+                std::string(kPluginKey));
+            DispatchNoResult(
+                "DeleteAllActor",
+                static_cast<RE::Actor*>(actor),
+                std::string(kPluginKey));
+            DispatchNoResult(
+                "Evaluate",
+                static_cast<RE::Actor*>(actor));
         }
 
         bool ApplyTransform(
@@ -168,10 +214,14 @@ namespace IEDSyncTogether
             const PlacementTransform& placement)
         {
             std::vector<float> position{
-                placement.position[0], placement.position[1], placement.position[2]
+                placement.position[0],
+                placement.position[1],
+                placement.position[2]
             };
             std::vector<float> rotation{
-                placement.rotation[0], placement.rotation[1], placement.rotation[2]
+                placement.rotation[0],
+                placement.rotation[1],
+                placement.rotation[2]
             };
 
             bool dispatched = true;
@@ -203,31 +253,44 @@ namespace IEDSyncTogether
             RE::Actor* actor,
             const RemoteRenderState& state)
         {
-            if (!actor || !GetVM()) return false;
+            if (!actor || !GetVM()) {
+                return false;
+            }
 
             bool dispatched = true;
             std::size_t visible = 0;
             std::size_t placed = 0;
 
-            dispatched &= DispatchNoResult("RemoveActorBlock", static_cast<RE::Actor*>(actor), std::string(kPluginKey));
-            dispatched &= DispatchNoResult("DeleteAllActor", static_cast<RE::Actor*>(actor), std::string(kPluginKey));
+            dispatched &= DispatchNoResult(
+                "RemoveActorBlock",
+                static_cast<RE::Actor*>(actor),
+                std::string(kPluginKey));
+            dispatched &= DispatchNoResult(
+                "DeleteAllActor",
+                static_cast<RE::Actor*>(actor),
+                std::string(kPluginKey));
 
             for (std::size_t slot = 0; slot < state.size(); ++slot) {
                 const auto& remote = state[slot];
-                if (remote.formID == 0) continue;
+                if (remote.formID == 0) {
+                    continue;
+                }
 
                 auto* form = RE::TESForm::LookupByID(remote.formID);
                 if (!form) {
                     SKSE::log::warn(
                         "IED custom render skipped unresolved form: proxy={:08X} slot={} form={:08X}",
-                        actor->GetFormID(), slot, remote.formID);
+                        actor->GetFormID(),
+                        slot,
+                        remote.formID);
                     continue;
                 }
 
                 ++visible;
                 const auto name = fmt::format("remote-slot-{:02}", slot);
                 const auto node = remote.placement && !remote.placement->node.empty() ?
-                    remote.placement->node : std::string(kGearNodes[slot]);
+                    remote.placement->node :
+                    std::string(kGearNodes[slot]);
 
                 dispatched &= DispatchNoResult(
                     "CreateItemActor",
@@ -255,9 +318,11 @@ namespace IEDSyncTogether
                         name,
                         female,
                         node);
+
                     if (remote.placement) {
                         dispatched &= ApplyTransform(actor, name, female, *remote.placement);
                     }
+
                     if (kLeftWeaponSlots[slot]) {
                         dispatched &= DispatchNoResult(
                             "SetItemLeftWeaponActor",
@@ -267,6 +332,7 @@ namespace IEDSyncTogether
                             female,
                             true);
                     }
+
                     dispatched &= DispatchNoResult(
                         "SetItemEnabledActor",
                         static_cast<RE::Actor*>(actor),
@@ -279,18 +345,30 @@ namespace IEDSyncTogether
                 if (remote.placement) {
                     ++placed;
                     SKSE::log::debug(
-                        "IED placement applied: proxy={:08X} slot={} node=\"{}\" pos=({:.2f},{:.2f},{:.2f}) rot=({:.2f},{:.2f},{:.2f}) scale={:.3f}",
-                        actor->GetFormID(), slot, remote.placement->node,
-                        remote.placement->position[0], remote.placement->position[1], remote.placement->position[2],
-                        remote.placement->rotation[0], remote.placement->rotation[1], remote.placement->rotation[2],
+                        "IED placement applied: proxy={:08X} slot={} anchor=\"{}\" pos=({:.2f},{:.2f},{:.2f}) rot=({:.2f},{:.2f},{:.2f}) scale={:.3f}",
+                        actor->GetFormID(),
+                        slot,
+                        remote.placement->node,
+                        remote.placement->position[0],
+                        remote.placement->position[1],
+                        remote.placement->position[2],
+                        remote.placement->rotation[0],
+                        remote.placement->rotation[1],
+                        remote.placement->rotation[2],
                         remote.placement->scale);
                 }
             }
 
-            dispatched &= DispatchNoResult("Evaluate", static_cast<RE::Actor*>(actor));
+            dispatched &= DispatchNoResult(
+                "Evaluate",
+                static_cast<RE::Actor*>(actor));
+
             SKSE::log::info(
                 "IED Custom Item render queued: proxy={:08X} slots={} placements={} dispatchAccepted={}",
-                actor->GetFormID(), visible, placed, dispatched ? 1 : 0);
+                actor->GetFormID(),
+                visible,
+                placed,
+                dispatched ? 1 : 0);
             return dispatched;
         }
 
@@ -299,7 +377,9 @@ namespace IEDSyncTogether
             std::vector<RE::FormID> proxies;
             {
                 std::scoped_lock lock(g_remoteMutex);
-                proxies.assign(g_trackedRemoteProxies.begin(), g_trackedRemoteProxies.end());
+                proxies.assign(
+                    g_trackedRemoteProxies.begin(),
+                    g_trackedRemoteProxies.end());
             }
 
             for (const auto proxyFormID : proxies) {
@@ -336,15 +416,20 @@ namespace IEDSyncTogether
                     }
                 }
 
-                if (!matched) continue;
+                if (!matched) {
+                    continue;
+                }
 
                 bool changed = true;
                 {
                     std::scoped_lock lock(g_remoteMutex);
                     const auto iterator = g_appliedRemoteStates.find(proxyFormID);
-                    changed = iterator == g_appliedRemoteStates.end() || iterator->second != desired;
+                    changed = iterator == g_appliedRemoteStates.end() ||
+                        iterator->second != desired;
                 }
-                if (!changed) continue;
+                if (!changed) {
+                    continue;
+                }
 
                 if (ApplyRemoteCustomItems(actor, desired)) {
                     std::scoped_lock lock(g_remoteMutex);
@@ -353,7 +438,9 @@ namespace IEDSyncTogether
             }
         }
 
-        void DispatchCaptureSlot(const std::shared_ptr<CaptureRequest>& request, std::size_t slot);
+        void DispatchCaptureSlot(
+            const std::shared_ptr<CaptureRequest>& request,
+            std::size_t slot);
 
         void CompleteCaptureSlot(
             const std::shared_ptr<CaptureRequest>& request,
@@ -361,25 +448,39 @@ namespace IEDSyncTogether
             RE::FormID formID)
         {
             if (request->diagnostic) {
-                SKSE::log::debug("First IED capture: completed slot={} form={:08X}", slot, formID);
+                SKSE::log::debug(
+                    "First IED capture: completed slot={} form={:08X}",
+                    slot,
+                    formID);
             }
 
             if (formID != 0) {
-                request->slots[slot] = MakeFormIdentity(RE::TESForm::LookupByID(formID));
+                request->slots[slot] = MakeFormIdentity(
+                    RE::TESForm::LookupByID(formID));
+
                 if (request->slots[slot]) {
                     if (auto* player = RE::PlayerCharacter::GetSingleton()) {
                         request->slots[slot]->placement = CapturePlacement(player, slot);
+
                         if (request->slots[slot]->placement) {
                             const auto& p = *request->slots[slot]->placement;
                             SKSE::log::debug(
-                                "IED placement captured: slot={} gearNode=\"{}\" parent=\"{}\" pos=({:.2f},{:.2f},{:.2f}) rot=({:.2f},{:.2f},{:.2f}) scale={:.3f}",
-                                slot, kGearNodes[slot], p.node,
-                                p.position[0], p.position[1], p.position[2],
-                                p.rotation[0], p.rotation[1], p.rotation[2], p.scale);
+                                "IED placement captured: slot={} gearNode=\"{}\" anchor=\"{}\" pos=({:.2f},{:.2f},{:.2f}) rot=({:.2f},{:.2f},{:.2f}) scale={:.3f}",
+                                slot,
+                                kGearNodes[slot],
+                                p.node,
+                                p.position[0],
+                                p.position[1],
+                                p.position[2],
+                                p.rotation[0],
+                                p.rotation[1],
+                                p.rotation[2],
+                                p.scale);
                         } else {
                             SKSE::log::warn(
                                 "IED placement capture unavailable: slot={} gearNode=\"{}\"; remote renderer will use fallback node",
-                                slot, kGearNodes[slot]);
+                                slot,
+                                kGearNodes[slot]);
                         }
                     }
                 }
@@ -392,25 +493,34 @@ namespace IEDSyncTogether
             }
 
             if (request->diagnostic) {
-                SKSE::log::info("First IED capture: all 19 slots completed sequentially with scene-graph placement capture");
+                SKSE::log::info(
+                    "First IED capture: all 19 slots completed sequentially with scene-graph placement capture");
             }
 
             auto callback = std::move(request->callback);
-            if (callback) callback(std::move(request->slots));
+            if (callback) {
+                callback(std::move(request->slots));
+            }
         }
 
-        class SlotResultCallback final : public RE::BSScript::IStackCallbackFunctor
+        class SlotResultCallback final :
+            public RE::BSScript::IStackCallbackFunctor
         {
         public:
-            SlotResultCallback(std::shared_ptr<CaptureRequest> request, std::size_t slot) :
-                _request(std::move(request)), _slot(slot)
+            SlotResultCallback(
+                std::shared_ptr<CaptureRequest> request,
+                std::size_t slot) :
+                _request(std::move(request)),
+                _slot(slot)
             {}
 
             void operator()(RE::BSScript::Variable result) override
             {
                 RE::FormID formID = 0;
                 if (result.IsObject() && !result.IsNoneObject()) {
-                    if (auto* form = result.Unpack<RE::TESForm*>()) formID = form->GetFormID();
+                    if (auto* form = result.Unpack<RE::TESForm*>()) {
+                        formID = form->GetFormID();
+                    }
                 }
 
                 auto request = _request;
@@ -418,11 +528,16 @@ namespace IEDSyncTogether
                 auto complete = [request = std::move(request), slot, formID]() {
                     CompleteCaptureSlot(request, slot, formID);
                 };
-                if (auto* tasks = SKSE::GetTaskInterface()) tasks->AddTask(std::move(complete));
-                else complete();
+
+                if (auto* tasks = SKSE::GetTaskInterface()) {
+                    tasks->AddTask(std::move(complete));
+                } else {
+                    complete();
+                }
             }
 
-            void SetObject(const RE::BSTSmartPointer<RE::BSScript::Object>& object) override
+            void SetObject(
+                const RE::BSTSmartPointer<RE::BSScript::Object>& object) override
             {
                 _object = object;
             }
@@ -433,7 +548,9 @@ namespace IEDSyncTogether
             RE::BSTSmartPointer<RE::BSScript::Object> _object;
         };
 
-        void DispatchCaptureSlot(const std::shared_ptr<CaptureRequest>& request, std::size_t slot)
+        void DispatchCaptureSlot(
+            const std::shared_ptr<CaptureRequest>& request,
+            std::size_t slot)
         {
             auto* player = RE::PlayerCharacter::GetSingleton();
             auto* vm = GetVM();
@@ -443,7 +560,9 @@ namespace IEDSyncTogether
             }
 
             if (request->diagnostic) {
-                SKSE::log::debug("First IED capture: sequential dispatch begin slot={}", slot);
+                SKSE::log::debug(
+                    "First IED capture: sequential dispatch begin slot={}",
+                    slot);
             }
 
             RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> result(
@@ -460,13 +579,19 @@ namespace IEDSyncTogether
             if (request->diagnostic) {
                 SKSE::log::debug(
                     "First IED capture: sequential dispatch end slot={} dispatched={}",
-                    slot, dispatched ? 1 : 0);
+                    slot,
+                    dispatched ? 1 : 0);
             }
 
             if (!dispatched) {
-                auto complete = [request, slot]() { CompleteCaptureSlot(request, slot, 0); };
-                if (auto* tasks = SKSE::GetTaskInterface()) tasks->AddTask(std::move(complete));
-                else complete();
+                auto complete = [request, slot]() {
+                    CompleteCaptureSlot(request, slot, 0);
+                };
+                if (auto* tasks = SKSE::GetTaskInterface()) {
+                    tasks->AddTask(std::move(complete));
+                } else {
+                    complete();
+                }
             }
         }
     }
@@ -486,25 +611,31 @@ namespace IEDSyncTogether
     {
         auto* player = RE::PlayerCharacter::GetSingleton();
         auto* vm = GetVM();
-        if (!player || !vm || !callback || !IsInstalled()) return false;
+        if (!player || !vm || !callback || !IsInstalled()) {
+            return false;
+        }
 
         RefreshTrackedRemoteProxies();
 
         const bool diagnostic = !g_firstCaptureStarted.exchange(true);
         if (diagnostic) {
             SKSE::log::info(
-                "First IED capture: Papyrus slot API + scene-graph node/transform capture active; player={:08X}",
+                "First IED capture: Papyrus slot API + composed scene-graph Node Override capture active; player={:08X}",
                 player->GetFormID());
         }
 
-        auto request = std::make_shared<CaptureRequest>(std::move(callback), diagnostic);
+        auto request = std::make_shared<CaptureRequest>(
+            std::move(callback),
+            diagnostic);
         DispatchCaptureSlot(request, 0);
         return true;
     }
 
     bool IEDBridge::SetActorBlocked(RE::Actor* actor, bool blocked) const
     {
-        if (!actor || !GetVM() || !IsInstalled()) return false;
+        if (!actor || !GetVM() || !IsInstalled()) {
+            return false;
+        }
 
         const auto formID = actor->GetFormID();
         if (blocked) {
@@ -532,19 +663,25 @@ namespace IEDSyncTogether
         std::vector<RE::FormID> proxies;
         {
             std::scoped_lock lock(g_remoteMutex);
-            proxies.assign(g_trackedRemoteProxies.begin(), g_trackedRemoteProxies.end());
+            proxies.assign(
+                g_trackedRemoteProxies.begin(),
+                g_trackedRemoteProxies.end());
             g_trackedRemoteProxies.clear();
             g_appliedRemoteStates.clear();
         }
 
         for (const auto formID : proxies) {
             if (auto* form = RE::TESForm::LookupByID(formID)) {
-                if (auto* actor = form->As<RE::Actor>()) ClearRemoteCustomItems(actor);
+                if (auto* actor = form->As<RE::Actor>()) {
+                    ClearRemoteCustomItems(actor);
+                }
             }
         }
 
         if (!proxies.empty()) {
-            SKSE::log::info("IED Custom Item renderer reset: cleared {} tracked proxy/proxies", proxies.size());
+            SKSE::log::info(
+                "IED Custom Item renderer reset: cleared {} tracked proxy/proxies",
+                proxies.size());
         }
     }
 }
