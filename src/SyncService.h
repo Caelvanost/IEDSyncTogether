@@ -21,9 +21,11 @@ namespace IEDSyncTogether
             RE::FormID actorFormID,
             std::uint32_t slotIndex,
             RE::FormID& outFormID) const;
+        bool QueryRemoteSlotIdentity(
+            RE::FormID actorFormID,
+            std::uint32_t slotIndex,
+            FormIdentity& outIdentity) const;
 
-        // Read-only diagnostic accessors used by v0.3.2. They do not mutate
-        // proxy state, IED settings, STR inventory or equipment.
         [[nodiscard]] bool IsRemoteNpcSuppressionEnabled() const noexcept
         {
             return _config.suppressRemoteNpcDisplays;
@@ -36,9 +38,7 @@ namespace IEDSyncTogether
             result.reserve(_knownPeers.size());
             for (const auto& [peerID, peer] : _knownPeers) {
                 (void)peerID;
-                if (peer.currentProxy != 0) {
-                    result.push_back(peer.currentProxy);
-                }
+                if (peer.currentProxy != 0) result.push_back(peer.currentProxy);
             }
             return result;
         }

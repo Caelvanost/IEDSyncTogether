@@ -10,13 +10,9 @@ namespace
     void InitializeLogging()
     {
         auto directory = SKSE::log::log_directory();
-        if (!directory) {
-            return;
-        }
+        if (!directory) return;
         *directory /= "IEDSyncTogether.log";
-        auto sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
-            directory->string(),
-            true);
+        auto sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(directory->string(), true);
         auto logger = std::make_shared<spdlog::logger>("IEDSyncTogether", std::move(sink));
         spdlog::set_default_logger(std::move(logger));
         spdlog::set_level(spdlog::level::trace);
@@ -31,22 +27,16 @@ namespace
 
         switch (message->type) {
         case SKSE::MessagingInterface::kDataLoaded:
-            // v0.3.3 keeps the v0.3.2 read-only diagnostic architecture.
-            // Rendering stays on IED's official Papyrus Custom Item API while
-            // diagnostics verify the setting and proxy classification
-            // assumptions behind IED's native disable_npc_slots path.
             SKSE::log::info(
-                "IED integration mode: official Papyrus Custom Item API + read-only diagnostics; no ActorBlock probe and no IED runtime patch installed");
+                "IED integration mode: public Papyrus Custom Items + scene-graph placement capture; no ActorBlock probe and no IED runtime patch installed");
             SKSE::log::info(
-                "IED v0.3.3 diagnostic: checking Data\\SKSE\\Plugins\\IED\\Settings.json disable_npc_slots and exact STR proxy vs PlayerCharacter identity");
+                "IED v0.4.0 placement sync: capturing effective gear-node parent + local position/rotation/scale for displayed slots");
             service.Start();
             diagnostics.Start();
             break;
 
         case SKSE::MessagingInterface::kPreLoadGame:
             diagnostics.Reset();
-            // IED custom entries are save-persistent. Clear every proxy still
-            // owned by this runtime before the VM swaps to another save.
             IEDBridge::GetSingleton().ResetRemoteRendering();
             service.SetGameLoaded(false);
             service.Reset();

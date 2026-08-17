@@ -4,11 +4,24 @@
 
 namespace IEDSyncTogether
 {
+    struct PlacementTransform
+    {
+        std::string node;
+        std::array<float, 3> position{};
+        std::array<float, 3> rotation{};
+        float scale{ 1.0f };
+
+        bool operator==(const PlacementTransform&) const = default;
+        auto operator<=>(const PlacementTransform&) const = default;
+    };
+
     struct FormIdentity
     {
         std::string plugin;
         std::uint32_t localFormID{ 0 };
+        std::optional<PlacementTransform> placement;
 
+        bool operator==(const FormIdentity&) const = default;
         auto operator<=>(const FormIdentity&) const = default;
     };
 

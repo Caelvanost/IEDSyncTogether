@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
     IEDSyncTogether
-    VERSION 0.3.3
+    VERSION 0.4.0
     LANGUAGES CXX
 )
 
@@ -28,6 +28,7 @@ add_commonlibsse_plugin(${PROJECT_NAME}
         src/UdpTransport.cpp
         src/UdpTransport.h
         src/SyncService.cpp
+        src/SyncServicePlacement.cpp
         src/SyncService.h
         include/IEDSyncTogether/Interface.h
 )
