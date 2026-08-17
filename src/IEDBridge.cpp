@@ -1,6 +1,7 @@
 #include "PCH.h"
 #include "IEDBridge.h"
 
+#include "IEDRuntimeHook.h"
 #include "IEDSyncTogether/Interface.h"
 #include "SyncService.h"
 
@@ -246,6 +247,7 @@ namespace IEDSyncTogether
                 auto* form = RE::TESForm::LookupByID(proxyFormID);
                 auto* actor = form ? form->As<RE::Actor>() : nullptr;
                 if (!actor) {
+                    IEDRuntimeHook::TrackRemoteProxy(proxyFormID, nullptr, false);
                     std::scoped_lock lock(g_remoteMutex);
                     g_trackedRemoteProxies.erase(proxyFormID);
                     g_appliedRemoteStates.erase(proxyFormID);
@@ -460,6 +462,10 @@ namespace IEDSyncTogether
 
         const auto formID = actor->GetFormID();
         if (blocked) {
+            // Arm the stock-slot filter before any Evaluate call can run. This
+            // prevents IED from rebuilding its ordinary NPC inventory display
+            // while our authoritative Custom Items are being installed.
+            IEDRuntimeHook::TrackRemoteProxy(formID, actor, true);
             ClearRemoteCustomItems(actor);
             {
                 std::scoped_lock lock(g_remoteMutex);
@@ -470,6 +476,7 @@ namespace IEDSyncTogether
             return true;
         }
 
+        IEDRuntimeHook::TrackRemoteProxy(formID, actor, false);
         {
             std::scoped_lock lock(g_remoteMutex);
             g_trackedRemoteProxies.erase(formID);
@@ -496,6 +503,7 @@ namespace IEDSyncTogether
                 }
             }
         }
+        IEDRuntimeHook::ClearTrackedProxies();
 
         if (!proxies.empty()) {
             SKSE::log::info("IED Custom Item renderer reset: cleared {} tracked proxy/proxies", proxies.size());
