@@ -31,14 +31,14 @@ namespace
 
         switch (message->type) {
         case SKSE::MessagingInterface::kDataLoaded:
-            // v0.3.2 removes the v0.3.1 ActorBlock experiment completely.
+            // v0.3.3 keeps the v0.3.2 read-only diagnostic architecture.
             // Rendering stays on IED's official Papyrus Custom Item API while
-            // read-only diagnostics verify the setting and proxy classification
+            // diagnostics verify the setting and proxy classification
             // assumptions behind IED's native disable_npc_slots path.
             SKSE::log::info(
                 "IED integration mode: official Papyrus Custom Item API + read-only diagnostics; no ActorBlock probe and no IED runtime patch installed");
             SKSE::log::info(
-                "IED v0.3.2 diagnostic: checking Data\\SKSE\\Plugins\\IED\\Settings.json disable_npc_slots and exact STR proxy vs PlayerCharacter identity");
+                "IED v0.3.3 diagnostic: checking Data\\SKSE\\Plugins\\IED\\Settings.json disable_npc_slots and exact STR proxy vs PlayerCharacter identity");
             service.Start();
             diagnostics.Start();
             break;
