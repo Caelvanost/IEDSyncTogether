@@ -1,113 +1,191 @@
 #include "PCH.h"
 #include "IEDRuntimeHook.h"
 
-#include <cstddef>
+#include <Windows.h>
+
 #include <cstring>
-#include <limits>
 
 namespace IEDSyncTogether
 {
     namespace
     {
-        constexpr std::uintptr_t kSelectSlotItemCallRva = 0xE3806;
-        constexpr std::uintptr_t kSelectSlotItemRva = 0x146360;
-        constexpr std::uintptr_t kTrampolineSearchBias = 0x40000000ull;
+        // Source/call-stack aligned with official IED 1.7.4 (ied-dev commit
+        // 3f014c3e8574ef0e88b2ec0b7cdf58b86c9737b0). Unlike v0.2.2, this
+        // hook never changes SelectSlotItem's return value. It skips the
+        // complete void ProcessSlots call for a tracked STR proxy, matching
+        // IED's own disableNPCSlots control flow while leaving ProcessCustom
+        // to execute immediately afterwards.
+        constexpr std::uintptr_t kProcessSlotsCallRva = 0xDF58C;
+        constexpr std::uintptr_t kProcessSlotsReturnRva = 0xDF591;
+        constexpr std::uintptr_t kObservedProcessSlotsBodyRva = 0xE5C70;
 
-        constexpr std::array<std::uint8_t, 5> kExpectedCall{
+        // Known official 1.7.4 signatures retained only as a build fingerprint.
+        // These locations are never patched by v0.2.4.
+        constexpr std::uintptr_t kFingerprintCallRva = 0xE3806;
+        constexpr std::uintptr_t kFingerprintFunctionRva = 0x146360;
+        constexpr std::array<std::uint8_t, 5> kExpectedFingerprintCall{
             0xE8, 0x55, 0x2B, 0x06, 0x00
         };
-
-        constexpr std::array<std::uint8_t, 16> kExpectedSelectSlotItemPrologue{
+        constexpr std::array<std::uint8_t, 16> kExpectedFingerprintFunction{
             0x4C, 0x89, 0x4C, 0x24, 0x20, 0x53, 0x56, 0x57,
             0x41, 0x54, 0x41, 0x55, 0x48, 0x83, 0xEC, 0x30
         };
 
-        // ProcessParams is an IED-private type. We deliberately do not declare
-        // its layout. The source-verified structure is much larger than this
-        // prefix and its CommonParams base stores the Actor* in the prefix. We
-        // only compare machine words against already-known STR proxy addresses;
-        // no candidate pointer is dereferenced.
-        constexpr std::size_t kProcessParamsProbeBytes = 0xA0;
         constexpr std::size_t kMaxTrackedProxies = 16;
-
-#pragma pack(push, 1)
-        struct RelativeCall
-        {
-            std::uint8_t opcode{ 0xE8 };
-            std::int32_t displacement{ 0 };
-        };
-        static_assert(sizeof(RelativeCall) == 0x5);
-#pragma pack(pop)
 
         struct TrackedProxy
         {
-            std::atomic<std::uintptr_t> actor{ 0 };
+            std::atomic<std::uint32_t> nativeHandle{ 0 };
             std::atomic<RE::FormID> formID{ 0 };
-            std::atomic_bool suppressionHit{ false };
-            std::atomic_bool suppressionReported{ false };
         };
 
-        struct RelayStorage
-        {
-            std::array<std::uint8_t, 128> code{};
-        };
+        using ProcessSlotsFn = void (*)(void*, void*) noexcept;
 
-        SKSE::Trampoline g_iedTrampoline{ "IEDSyncTogether.IED" };
+        SKSE::Trampoline g_iedTrampoline{ "IEDSyncTogether.IED.ProcessSlots" };
         std::array<TrackedProxy, kMaxTrackedProxies> g_trackedProxies{};
+        ProcessSlotsFn g_originalProcessSlots{ nullptr };
         bool g_installed{ false };
 
-        bool MatchBytes(std::uintptr_t address, const auto& expected) noexcept
+        bool IsRangeInsideImage(
+            std::uintptr_t rva,
+            std::size_t length,
+            std::uint32_t imageSize) noexcept
         {
+            return rva <= imageSize &&
+                   length <= imageSize - static_cast<std::size_t>(rva);
+        }
+
+        const IMAGE_NT_HEADERS64* GetNtHeaders(std::uintptr_t base) noexcept
+        {
+            if (!base) {
+                return nullptr;
+            }
+
+            const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+            if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0) {
+                return nullptr;
+            }
+
+            const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(
+                base + static_cast<std::uintptr_t>(dos->e_lfanew));
+            if (nt->Signature != IMAGE_NT_SIGNATURE ||
+                nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+                nt->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64) {
+                return nullptr;
+            }
+
+            return nt;
+        }
+
+        template <class T>
+        bool MatchBytes(
+            std::uintptr_t base,
+            std::uintptr_t rva,
+            const T& expected,
+            std::uint32_t imageSize) noexcept
+        {
+            if (!IsRangeInsideImage(rva, expected.size(), imageSize)) {
+                return false;
+            }
+
             return std::memcmp(
-                reinterpret_cast<const void*>(address),
+                reinterpret_cast<const void*>(base + rva),
                 expected.data(),
                 expected.size()) == 0;
         }
 
-        bool GetRelative32(
-            std::uintptr_t nextInstruction,
-            std::uintptr_t target,
-            std::int32_t& out) noexcept
+        const RUNTIME_FUNCTION* FindRuntimeFunction(
+            std::uintptr_t base,
+            const IMAGE_NT_HEADERS64* nt,
+            std::uint32_t rva) noexcept
         {
-            const auto displacement =
-                static_cast<std::int64_t>(target) -
-                static_cast<std::int64_t>(nextInstruction);
+            if (!base || !nt) {
+                return nullptr;
+            }
 
-            if (displacement < (std::numeric_limits<std::int32_t>::min)() ||
-                displacement > (std::numeric_limits<std::int32_t>::max)()) {
+            const auto imageSize = nt->OptionalHeader.SizeOfImage;
+            const auto& directory =
+                nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+            if (!directory.VirtualAddress ||
+                directory.Size < sizeof(RUNTIME_FUNCTION) ||
+                !IsRangeInsideImage(directory.VirtualAddress, directory.Size, imageSize)) {
+                return nullptr;
+            }
+
+            const auto* table = reinterpret_cast<const RUNTIME_FUNCTION*>(
+                base + directory.VirtualAddress);
+            const auto count = directory.Size / sizeof(RUNTIME_FUNCTION);
+            for (std::size_t i = 0; i < count; ++i) {
+                const auto& entry = table[i];
+                if (rva >= entry.BeginAddress && rva < entry.EndAddress) {
+                    return std::addressof(entry);
+                }
+            }
+
+            return nullptr;
+        }
+
+        bool SameRuntimeFunction(
+            const RUNTIME_FUNCTION* lhs,
+            const RUNTIME_FUNCTION* rhs) noexcept
+        {
+            return lhs && rhs &&
+                   lhs->BeginAddress == rhs->BeginAddress &&
+                   lhs->EndAddress == rhs->EndAddress;
+        }
+
+        bool DecodeRelativeCall(
+            std::uintptr_t callSite,
+            std::uintptr_t base,
+            std::uint32_t imageSize,
+            std::uintptr_t& outTarget,
+            std::uint32_t& outTargetRva) noexcept
+        {
+            if (!IsRangeInsideImage(callSite - base, 5, imageSize) ||
+                *reinterpret_cast<const std::uint8_t*>(callSite) != 0xE8) {
                 return false;
             }
 
-            out = static_cast<std::int32_t>(displacement);
+            std::int32_t displacement = 0;
+            std::memcpy(
+                std::addressof(displacement),
+                reinterpret_cast<const void*>(callSite + 1),
+                sizeof(displacement));
+
+            const auto targetSigned =
+                static_cast<std::int64_t>(callSite + 5) + displacement;
+            if (targetSigned < static_cast<std::int64_t>(base) ||
+                targetSigned >= static_cast<std::int64_t>(base + imageSize)) {
+                return false;
+            }
+
+            outTarget = static_cast<std::uintptr_t>(targetSigned);
+            outTargetRva = static_cast<std::uint32_t>(outTarget - base);
             return true;
         }
 
-        bool ShouldSuppressStockSlots(const void* processParams) noexcept
+        bool ShouldSuppressProcessSlots(const void* processParams) noexcept
         {
             if (!processParams) {
                 return false;
             }
 
-            const auto* bytes = static_cast<const std::byte*>(processParams);
-            for (std::size_t offset = 0;
-                 offset + sizeof(std::uintptr_t) <= kProcessParamsProbeBytes;
-                 offset += sizeof(std::uintptr_t)) {
-                std::uintptr_t candidate = 0;
-                std::memcpy(&candidate, bytes + offset, sizeof(candidate));
-                if (!candidate) {
-                    continue;
-                }
+            // IED 1.7.4 ProcessParams derives from ProcessParamsData, whose
+            // first member is const Game::ObjectRefHandle handle. Skyrim's
+            // reference handle is a 32-bit native value. Reading only this
+            // source-verified prefix avoids interpreting any other IED-private
+            // layout.
+            std::uint32_t nativeHandle = 0;
+            std::memcpy(
+                std::addressof(nativeHandle),
+                processParams,
+                sizeof(nativeHandle));
+            if (!nativeHandle) {
+                return false;
+            }
 
-                for (auto& tracked : g_trackedProxies) {
-                    const auto actor = tracked.actor.load(std::memory_order_acquire);
-                    if (!actor || candidate != actor) {
-                        continue;
-                    }
-
-                    // Keep generated relay execution strictly allocation-free and
-                    // exception-free. Reporting is deferred to the normal bridge
-                    // path via ReportSuppressionHit().
-                    tracked.suppressionHit.store(true, std::memory_order_release);
+            for (const auto& entry : g_trackedProxies) {
+                if (entry.nativeHandle.load(std::memory_order_acquire) == nativeHandle) {
                     return true;
                 }
             }
@@ -115,81 +193,15 @@ namespace IEDSyncTogether
             return false;
         }
 
-        std::size_t BuildRelay(
-            std::uint8_t* code,
-            std::uintptr_t helper,
-            std::uintptr_t stockTarget)
+        void ProcessSlotsHook(void* controller, void* processParams) noexcept
         {
-            std::size_t offset = 0;
-
-            auto emit = [&](std::initializer_list<std::uint8_t> bytes) {
-                for (const auto byte : bytes) {
-                    code[offset++] = byte;
-                }
-            };
-            auto emit64 = [&](std::uint64_t value) {
-                std::memcpy(code + offset, &value, sizeof(value));
-                offset += sizeof(value);
-            };
-
-            // Preserve the original SelectSlotItem argument registers and RAX.
-            // Seven pushes move RSP from 8 mod 16 to 0 mod 16; the helper call
-            // then gets the required 32-byte Windows x64 shadow space.
-            emit({ 0x50 });
-            emit({ 0x51 });
-            emit({ 0x52 });
-            emit({ 0x41, 0x50 });
-            emit({ 0x41, 0x51 });
-            emit({ 0x41, 0x52 });
-            emit({ 0x41, 0x53 });
-            emit({ 0x48, 0x83, 0xEC, 0x20 });
-
-            emit({ 0x48, 0x89, 0xD1 }); // mov rcx, rdx (ProcessParams*)
-            emit({ 0x48, 0xB8 });
-            emit64(helper);
-            emit({ 0xFF, 0xD0 });
-            emit({ 0x48, 0x83, 0xC4, 0x20 });
-            emit({ 0x84, 0xC0 });
-
-            emit({ 0x75, 0x00 });
-            const auto suppressJumpDisp = offset - 1;
-
-            // Passthrough: restore everything and tail-jump to the exact stock
-            // IED function. The RIP-indirect jump does not consume a register.
-            emit({ 0x41, 0x5B });
-            emit({ 0x41, 0x5A });
-            emit({ 0x41, 0x59 });
-            emit({ 0x41, 0x58 });
-            emit({ 0x5A });
-            emit({ 0x59 });
-            emit({ 0x58 });
-            emit({ 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00 });
-            emit64(stockTarget);
-
-            const auto suppressOffset = offset;
-            const auto displacement = static_cast<std::ptrdiff_t>(suppressOffset) -
-                                      static_cast<std::ptrdiff_t>(suppressJumpDisp + 1);
-            if (displacement < (std::numeric_limits<std::int8_t>::min)() ||
-                displacement > (std::numeric_limits<std::int8_t>::max)()) {
-                return 0;
+            if (ShouldSuppressProcessSlots(processParams)) {
+                return;
             }
-            code[suppressJumpDisp] = static_cast<std::uint8_t>(
-                static_cast<std::int8_t>(displacement));
 
-            // Suppressed: restore the caller state and return nullptr. The
-            // surrounding ProcessSlots removes its stock entry; ProcessCustom
-            // is executed afterwards by IED and remains completely untouched.
-            emit({ 0x41, 0x5B });
-            emit({ 0x41, 0x5A });
-            emit({ 0x41, 0x59 });
-            emit({ 0x41, 0x58 });
-            emit({ 0x5A });
-            emit({ 0x59 });
-            emit({ 0x58 });
-            emit({ 0x31, 0xC0 });
-            emit({ 0xC3 });
-
-            return offset;
+            if (const auto original = g_originalProcessSlots) {
+                original(controller, processParams);
+            }
         }
     }
 
@@ -201,76 +213,90 @@ namespace IEDSyncTogether
 
         const auto module = GetModuleHandleW(L"ImmersiveEquipmentDisplays.dll");
         if (!module) {
-            SKSE::log::critical("IED stock-slot shim: ImmersiveEquipmentDisplays.dll is not loaded");
+            SKSE::log::warn(
+                "IED ProcessSlots suppression unavailable: ImmersiveEquipmentDisplays.dll is not loaded");
             return false;
         }
 
         const auto base = reinterpret_cast<std::uintptr_t>(module);
-        const auto callSite = base + kSelectSlotItemCallRva;
-        const auto selectSlotItem = base + kSelectSlotItemRva;
-
-        if (!MatchBytes(callSite, kExpectedCall)) {
-            SKSE::log::critical(
-                "IED stock-slot shim: unsupported IED build (SelectSlotItem call signature mismatch at RVA 0x{:X})",
-                kSelectSlotItemCallRva);
+        const auto* nt = GetNtHeaders(base);
+        if (!nt) {
+            SKSE::log::warn(
+                "IED ProcessSlots suppression unavailable: invalid IED PE headers");
             return false;
         }
 
-        if (!MatchBytes(selectSlotItem, kExpectedSelectSlotItemPrologue)) {
-            SKSE::log::critical(
-                "IED stock-slot shim: unsupported IED build (SelectSlotItem signature mismatch at RVA 0x{:X})",
-                kSelectSlotItemRva);
+        const auto imageSize = nt->OptionalHeader.SizeOfImage;
+        if (!MatchBytes(
+                base,
+                kFingerprintCallRva,
+                kExpectedFingerprintCall,
+                imageSize) ||
+            !MatchBytes(
+                base,
+                kFingerprintFunctionRva,
+                kExpectedFingerprintFunction,
+                imageSize)) {
+            SKSE::log::warn(
+                "IED ProcessSlots suppression unavailable: official IED 1.7.4 fingerprint mismatch; no memory was modified");
             return false;
         }
 
-        std::int32_t originalDisplacement = 0;
-        std::memcpy(
-            &originalDisplacement,
-            reinterpret_cast<const void*>(callSite + 1),
-            sizeof(originalDisplacement));
-        const auto originalTarget = callSite + sizeof(RelativeCall) + originalDisplacement;
-        if (originalTarget != selectSlotItem) {
-            SKSE::log::critical(
-                "IED stock-slot shim: call target mismatch (expected RVA 0x{:X})",
-                kSelectSlotItemRva);
+        if (!IsRangeInsideImage(kProcessSlotsCallRva, 5, imageSize) ||
+            kProcessSlotsReturnRva != kProcessSlotsCallRva + 5) {
+            SKSE::log::warn(
+                "IED ProcessSlots suppression unavailable: invalid validated call-site range");
             return false;
         }
 
-        const auto searchCenter = callSite + kTrampolineSearchBias;
-        g_iedTrampoline.create(
-            256,
-            reinterpret_cast<void*>(searchCenter));
-
-        auto* storage = g_iedTrampoline.allocate<RelayStorage>();
-        const auto relaySize = BuildRelay(
-            storage->code.data(),
-            reinterpret_cast<std::uintptr_t>(&ShouldSuppressStockSlots),
-            selectSlotItem);
-        if (relaySize == 0 || relaySize > storage->code.size()) {
-            SKSE::log::critical("IED stock-slot shim: failed to build relay");
-            return false;
-        }
-
-        std::int32_t relayDisplacement = 0;
-        const auto relayAddress = reinterpret_cast<std::uintptr_t>(storage->code.data());
-        if (!GetRelative32(callSite + sizeof(RelativeCall), relayAddress, relayDisplacement)) {
-            SKSE::log::critical(
-                "IED stock-slot shim: allocated relay is outside rel32 range (call=0x{:X}, relay=0x{:X})",
+        const auto callSite = base + kProcessSlotsCallRva;
+        std::uintptr_t originalTarget = 0;
+        std::uint32_t originalTargetRva = 0;
+        if (!DecodeRelativeCall(
                 callSite,
-                relayAddress);
+                base,
+                imageSize,
+                originalTarget,
+                originalTargetRva)) {
+            SKSE::log::warn(
+                "IED ProcessSlots suppression unavailable: expected CALL rel32 missing at RVA 0x{:X}; no memory was modified",
+                kProcessSlotsCallRva);
             return false;
         }
 
-        RelativeCall patchedCall{};
-        patchedCall.displacement = relayDisplacement;
-        REL::safe_write(callSite, &patchedCall, sizeof(patchedCall));
-        g_installed = true;
+        const auto* callerFunction =
+            FindRuntimeFunction(base, nt, static_cast<std::uint32_t>(kProcessSlotsCallRva));
+        const auto* returnFunction =
+            FindRuntimeFunction(base, nt, static_cast<std::uint32_t>(kProcessSlotsReturnRva));
+        const auto* targetFunction =
+            FindRuntimeFunction(base, nt, originalTargetRva);
+        const auto* observedBodyFunction =
+            FindRuntimeFunction(base, nt, static_cast<std::uint32_t>(kObservedProcessSlotsBodyRva));
 
+        if (!SameRuntimeFunction(callerFunction, returnFunction) ||
+            !SameRuntimeFunction(targetFunction, observedBodyFunction) ||
+            !targetFunction ||
+            originalTargetRva != targetFunction->BeginAddress) {
+            SKSE::log::warn(
+                "IED ProcessSlots suppression unavailable: PE unwind validation failed at call RVA 0x{:X} target RVA 0x{:X}; no memory was modified",
+                kProcessSlotsCallRva,
+                originalTargetRva);
+            return false;
+        }
+
+        // CommonLib's 5-byte call trampoline allocates an in-range relay and
+        // preserves the original call target. We deliberately patch only this
+        // void ProcessSlots invocation; SelectSlotItem remains untouched.
+        g_originalProcessSlots =
+            reinterpret_cast<ProcessSlotsFn>(originalTarget);
+        g_iedTrampoline.create(64, reinterpret_cast<void*>(callSite));
+        g_iedTrampoline.write_call<5>(callSite, &ProcessSlotsHook);
+
+        g_installed = true;
         SKSE::log::info(
-            "IED 1.7.4 proxy stock-slot shim installed: call RVA=0x{:X} relay=0x{:X} stock SelectSlotItem RVA=0x{:X}; official DLL unchanged on disk",
-            kSelectSlotItemCallRva,
-            relayAddress,
-            kSelectSlotItemRva);
+            "IED 1.7.4 proxy ProcessSlots suppression installed: call RVA=0x{:X} target RVA=0x{:X}; SelectSlotItem untouched; official DLL unchanged on disk",
+            kProcessSlotsCallRva,
+            originalTargetRva);
         return true;
     }
 
@@ -284,83 +310,71 @@ namespace IEDSyncTogether
         RE::Actor* actor,
         bool tracked) noexcept
     {
-        const auto address = reinterpret_cast<std::uintptr_t>(actor);
+        if (!g_installed) {
+            return;
+        }
+
+        std::uint32_t nativeHandle = 0;
+        if (actor) {
+            RE::ObjectRefHandle handle(actor);
+            nativeHandle = handle.native_handle();
+        }
 
         if (!tracked) {
             for (auto& entry : g_trackedProxies) {
                 const auto storedFormID = entry.formID.load(std::memory_order_acquire);
-                const auto storedActor = entry.actor.load(std::memory_order_acquire);
+                const auto storedHandle = entry.nativeHandle.load(std::memory_order_acquire);
                 if ((formID != 0 && storedFormID == formID) ||
-                    (address != 0 && storedActor == address)) {
-                    entry.actor.store(0, std::memory_order_release);
+                    (nativeHandle != 0 && storedHandle == nativeHandle)) {
+                    entry.nativeHandle.store(0, std::memory_order_release);
                     entry.formID.store(0, std::memory_order_release);
-                    entry.suppressionHit.store(false, std::memory_order_release);
-                    entry.suppressionReported.store(false, std::memory_order_release);
                 }
             }
             return;
         }
 
-        if (!actor || formID == 0) {
+        if (!actor || formID == 0 || nativeHandle == 0) {
+            SKSE::log::warn(
+                "IED ProcessSlots suppression could not track proxy {:08X}: no live native reference handle",
+                formID);
             return;
         }
 
         for (auto& entry : g_trackedProxies) {
-            if (entry.formID.load(std::memory_order_acquire) == formID) {
-                entry.actor.store(address, std::memory_order_release);
-                entry.suppressionHit.store(false, std::memory_order_release);
-                entry.suppressionReported.store(false, std::memory_order_release);
+            if (entry.formID.load(std::memory_order_acquire) == formID ||
+                entry.nativeHandle.load(std::memory_order_acquire) == nativeHandle) {
+                entry.formID.store(formID, std::memory_order_release);
+                entry.nativeHandle.store(nativeHandle, std::memory_order_release);
                 return;
             }
         }
 
         for (auto& entry : g_trackedProxies) {
-            std::uintptr_t expected = 0;
-            if (entry.actor.compare_exchange_strong(
+            std::uint32_t expected = 0;
+            if (entry.nativeHandle.compare_exchange_strong(
                     expected,
-                    address,
+                    nativeHandle,
                     std::memory_order_acq_rel,
                     std::memory_order_acquire)) {
                 entry.formID.store(formID, std::memory_order_release);
-                entry.suppressionHit.store(false, std::memory_order_release);
-                entry.suppressionReported.store(false, std::memory_order_release);
-                SKSE::log::debug(
-                    "IED stock-slot suppression armed: proxy={:08X} actor=0x{:X}",
+                SKSE::log::info(
+                    "IED ProcessSlots suppression armed: proxy={:08X} handle={:08X}",
                     formID,
-                    address);
+                    nativeHandle);
                 return;
             }
         }
 
         SKSE::log::error(
-            "IED stock-slot suppression table full; proxy {:08X} will keep stock IED slots",
+            "IED ProcessSlots suppression table full; proxy {:08X} will keep normal IED NPC slots",
             formID);
     }
 
     void IEDRuntimeHook::ClearTrackedProxies() noexcept
     {
         for (auto& entry : g_trackedProxies) {
-            entry.actor.store(0, std::memory_order_release);
+            entry.nativeHandle.store(0, std::memory_order_release);
             entry.formID.store(0, std::memory_order_release);
-            entry.suppressionHit.store(false, std::memory_order_release);
-            entry.suppressionReported.store(false, std::memory_order_release);
-        }
-    }
-
-    void IEDRuntimeHook::ReportSuppressionHit(RE::FormID formID) noexcept
-    {
-        for (auto& entry : g_trackedProxies) {
-            if (entry.formID.load(std::memory_order_acquire) != formID ||
-                !entry.suppressionHit.load(std::memory_order_acquire)) {
-                continue;
-            }
-
-            if (!entry.suppressionReported.exchange(true, std::memory_order_acq_rel)) {
-                SKSE::log::info(
-                    "IED stock-slot suppression confirmed: proxy={:08X}; normal ProcessSlots entries are filtered while Custom Items remain active",
-                    formID);
-            }
-            return;
         }
     }
 }

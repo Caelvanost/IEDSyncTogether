@@ -10,15 +10,15 @@ namespace IEDSyncTogether
         static bool Install();
         static bool IsInstalled() noexcept;
 
-        // Registers only the transient STR proxy address. The runtime shim uses
-        // pointer equality and never interprets or dereferences IED private
-        // ProcessParams fields.
-        static void TrackRemoteProxy(RE::FormID formID, RE::Actor* actor, bool tracked) noexcept;
-        static void ClearTrackedProxies() noexcept;
+        // Registers the transient Skyrim reference handle of a resolved STR
+        // proxy. The ProcessSlots hook reads only the source-verified first
+        // 32-bit handle field of IED's ProcessParams and never dereferences or
+        // reconstructs any other private IED structure.
+        static void TrackRemoteProxy(
+            RE::FormID formID,
+            RE::Actor* actor,
+            bool tracked) noexcept;
 
-        // Called from the regular plugin path, never from generated relay code.
-        // Emits a one-shot confirmation after the relay has actually suppressed
-        // a stock IED slot for this proxy.
-        static void ReportSuppressionHit(RE::FormID formID) noexcept;
+        static void ClearTrackedProxies() noexcept;
     };
 }
