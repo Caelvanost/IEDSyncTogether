@@ -10,7 +10,6 @@ $BuildRoot = Join-Path $ProjectRoot "build"
 $PackageRoot = Join-Path $ProjectRoot "package"
 $PluginRoot = Join-Path $PackageRoot "Data\SKSE\Plugins"
 $ConfigSource = Join-Path $ProjectRoot "config\IEDSyncTogether.ini"
-$PatchedIedSource = Join-Path $ProjectRoot "third-party\IED-1.7.4\ImmersiveEquipmentDisplays.dll"
 $CMakeLists = Join-Path $ProjectRoot "CMakeLists.txt"
 
 $CMakeText = Get-Content -LiteralPath $CMakeLists -Raw
@@ -27,9 +26,6 @@ if (-not $VcpkgRoot) {
 $Toolchain = Join-Path $VcpkgRoot "scripts\buildsystems\vcpkg.cmake"
 if (-not (Test-Path -LiteralPath $Toolchain)) {
     throw "Toolchain vcpkg introuvable: $Toolchain"
-}
-if (-not (Test-Path -LiteralPath $PatchedIedSource -PathType Leaf)) {
-    throw "ImmersiveEquipmentDisplays.dll patche introuvable: $PatchedIedSource. Executez d'abord build-ied-patched.ps1 ou recuperez l'artefact GitHub Actions."
 }
 
 Write-Host "Nettoyage des dossiers build et package..." -ForegroundColor Cyan
@@ -123,7 +119,6 @@ if (-not $dll) {
 New-Item -ItemType Directory -Force -Path $PluginRoot | Out-Null
 Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $PluginRoot "IEDSyncTogether.dll") -Force
 Copy-Item -LiteralPath $ConfigSource -Destination (Join-Path $PluginRoot "IEDSyncTogether.ini") -Force
-Copy-Item -LiteralPath $PatchedIedSource -Destination (Join-Path $PluginRoot "ImmersiveEquipmentDisplays.dll") -Force
 Write-MinimalPlugin (Join-Path $PackageRoot "Data\IEDSyncTogether.esp")
 
 $DistRoot = Join-Path $ProjectRoot "dist"
@@ -142,12 +137,15 @@ try {
     foreach ($required in @(
         "Data/SKSE/Plugins/IEDSyncTogether.dll",
         "Data/SKSE/Plugins/IEDSyncTogether.ini",
-        "Data/SKSE/Plugins/ImmersiveEquipmentDisplays.dll",
         "Data/IEDSyncTogether.esp"
     )) {
         if ($entries -notcontains $required) {
             throw "Entree absente de l'archive: $required"
         }
+    }
+
+    if ($entries -contains "Data/SKSE/Plugins/ImmersiveEquipmentDisplays.dll") {
+        throw "Le package ne doit pas contenir ImmersiveEquipmentDisplays.dll: le hook utilise le DLL IED 1.7.4 officiel installe separement."
     }
 } finally {
     $zip.Dispose()
@@ -156,4 +154,4 @@ try {
 Write-Host ""
 Write-Host "Package Vortex cree:" -ForegroundColor Green
 Write-Host $Archive
-Write-Host "Le DLL IED 1.7.4 source-patche pour IEDSyncTogether est inclus dans l'archive." -ForegroundColor Green
+Write-Host "IED 1.7.4 officiel reste une dependance separee; aucun DLL IED modifie n'est inclus." -ForegroundColor Green

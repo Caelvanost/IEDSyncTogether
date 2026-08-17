@@ -1,6 +1,8 @@
 #include "PCH.h"
 #include "IEDBridge.h"
 
+#include "IEDRuntimeHook.h"
+
 #include <RE/F/FunctionArguments.h>
 #include <RE/I/IStackCallbackFunctor.h>
 #include <RE/P/PackUnpack.h>
@@ -13,8 +15,6 @@ namespace IEDSyncTogether
         constexpr std::string_view kPapyrusClass = "IED";
         constexpr std::string_view kPluginKey = "IEDSyncTogether.esp";
         std::atomic_bool g_firstCaptureStarted{ false };
-
-        using GetSourceBridgeVersionFn = std::uint32_t(__cdecl*)() noexcept;
 
         struct CaptureRequest
         {
@@ -174,23 +174,6 @@ namespace IEDSyncTogether
         return GetModuleHandleW(L"ImmersiveEquipmentDisplays.dll") != nullptr;
     }
 
-    std::uint32_t IEDBridge::GetSourceBridgeVersion() const
-    {
-        const auto module = GetModuleHandleW(L"ImmersiveEquipmentDisplays.dll");
-        if (!module) {
-            return 0;
-        }
-
-        const auto function = reinterpret_cast<GetSourceBridgeVersionFn>(
-            GetProcAddress(module, "IEDST_GetSourceBridgeVersion"));
-        return function ? function() : 0;
-    }
-
-    bool IEDBridge::HasSourceBridge() const
-    {
-        return GetSourceBridgeVersion() != 0;
-    }
-
     bool IEDBridge::CapturePlayerSlots(CaptureCallback callback)
     {
         auto* player = RE::PlayerCharacter::GetSingleton();
@@ -202,8 +185,8 @@ namespace IEDSyncTogether
         const bool diagnostic = !g_firstCaptureStarted.exchange(true);
         if (diagnostic) {
             SKSE::log::info(
-                "First IED capture: source bridge version={} ; starting sequential 19-slot capture player={:08X}",
-                GetSourceBridgeVersion(),
+                "First IED capture: early runtime hook installed={} ; starting sequential 19-slot capture player={:08X}",
+                IEDRuntimeHook::IsInstalled() ? 1 : 0,
                 player->GetFormID());
         }
 

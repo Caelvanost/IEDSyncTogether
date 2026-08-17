@@ -13,8 +13,6 @@ namespace IEDSyncTogether
         static IEDBridge& GetSingleton();
 
         bool IsInstalled() const;
-        std::uint32_t GetSourceBridgeVersion() const;
-        bool HasSourceBridge() const;
         bool CapturePlayerSlots(CaptureCallback callback);
         bool SetActorBlocked(RE::Actor* actor, bool blocked) const;
 
