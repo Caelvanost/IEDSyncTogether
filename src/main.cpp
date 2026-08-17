@@ -1,7 +1,6 @@
 #include "PCH.h"
 
 #include "IEDBridge.h"
-#include "IEDRuntimeHook.h"
 #include "IEDSyncTogether/Interface.h"
 #include "SyncService.h"
 
@@ -30,13 +29,10 @@ namespace
 
         switch (message->type) {
         case SKSE::MessagingInterface::kDataLoaded:
-            if (IEDRuntimeHook::Install()) {
-                SKSE::log::info(
-                    "IED integration mode: official Papyrus Custom Item API + targeted in-memory stock-slot suppression for tracked STR proxies");
-            } else {
-                SKSE::log::critical(
-                    "IED proxy stock-slot suppression unavailable; remote Custom Items can still render but normal IED NPC slots may remain visible");
-            }
+            // v0.2.0 intentionally performs no binary patching of IED. All IED
+            // integration goes through the native Papyrus API shipped by the
+            // official Immersive Equipment Displays 1.7.4 DLL.
+            SKSE::log::info("IED integration mode: official Papyrus API; no IED runtime patch installed");
             service.Start();
             break;
 
