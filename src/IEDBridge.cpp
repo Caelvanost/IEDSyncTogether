@@ -89,7 +89,8 @@ namespace IEDSyncTogether
             return vm->DispatchStaticCall(
                 RE::BSFixedString(kPapyrusClass.data()),
                 RE::BSFixedString(functionName.data()),
-                RE::MakeFunctionArguments(std::forward<Args>(args)...),
+                RE::MakeFunctionArguments(
+                    std::decay_t<Args>(std::forward<Args>(args))...),
                 callback);
         }
 
