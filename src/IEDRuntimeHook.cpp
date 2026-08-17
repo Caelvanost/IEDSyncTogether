@@ -43,7 +43,8 @@ namespace IEDSyncTogether
         {
             std::atomic<std::uintptr_t> actor{ 0 };
             std::atomic<RE::FormID> formID{ 0 };
-            std::atomic_bool logged{ false };
+            std::atomic_bool suppressionHit{ false };
+            std::atomic_bool suppressionReported{ false };
         };
 
         struct RelayStorage
@@ -103,12 +104,10 @@ namespace IEDSyncTogether
                         continue;
                     }
 
-                    if (!tracked.logged.exchange(true, std::memory_order_acq_rel)) {
-                        SKSE::log::info(
-                            "IED stock-slot suppression active: proxy={:08X} actor=0x{:X}",
-                            tracked.formID.load(std::memory_order_relaxed),
-                            actor);
-                    }
+                    // Keep generated relay execution strictly allocation-free and
+                    // exception-free. Reporting is deferred to the normal bridge
+                    // path via ReportSuppressionHit().
+                    tracked.suppressionHit.store(true, std::memory_order_release);
                     return true;
                 }
             }
@@ -295,7 +294,8 @@ namespace IEDSyncTogether
                     (address != 0 && storedActor == address)) {
                     entry.actor.store(0, std::memory_order_release);
                     entry.formID.store(0, std::memory_order_release);
-                    entry.logged.store(false, std::memory_order_release);
+                    entry.suppressionHit.store(false, std::memory_order_release);
+                    entry.suppressionReported.store(false, std::memory_order_release);
                 }
             }
             return;
@@ -307,8 +307,9 @@ namespace IEDSyncTogether
 
         for (auto& entry : g_trackedProxies) {
             if (entry.formID.load(std::memory_order_acquire) == formID) {
-                entry.logged.store(false, std::memory_order_release);
                 entry.actor.store(address, std::memory_order_release);
+                entry.suppressionHit.store(false, std::memory_order_release);
+                entry.suppressionReported.store(false, std::memory_order_release);
                 return;
             }
         }
@@ -321,7 +322,8 @@ namespace IEDSyncTogether
                     std::memory_order_acq_rel,
                     std::memory_order_acquire)) {
                 entry.formID.store(formID, std::memory_order_release);
-                entry.logged.store(false, std::memory_order_release);
+                entry.suppressionHit.store(false, std::memory_order_release);
+                entry.suppressionReported.store(false, std::memory_order_release);
                 SKSE::log::debug(
                     "IED stock-slot suppression armed: proxy={:08X} actor=0x{:X}",
                     formID,
@@ -340,7 +342,25 @@ namespace IEDSyncTogether
         for (auto& entry : g_trackedProxies) {
             entry.actor.store(0, std::memory_order_release);
             entry.formID.store(0, std::memory_order_release);
-            entry.logged.store(false, std::memory_order_release);
+            entry.suppressionHit.store(false, std::memory_order_release);
+            entry.suppressionReported.store(false, std::memory_order_release);
+        }
+    }
+
+    void IEDRuntimeHook::ReportSuppressionHit(RE::FormID formID) noexcept
+    {
+        for (auto& entry : g_trackedProxies) {
+            if (entry.formID.load(std::memory_order_acquire) != formID ||
+                !entry.suppressionHit.load(std::memory_order_acquire)) {
+                continue;
+            }
+
+            if (!entry.suppressionReported.exchange(true, std::memory_order_acq_rel)) {
+                SKSE::log::info(
+                    "IED stock-slot suppression confirmed: proxy={:08X}; normal ProcessSlots entries are filtered while Custom Items remain active",
+                    formID);
+            }
+            return;
         }
     }
 }
