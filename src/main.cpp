@@ -32,7 +32,7 @@ namespace
         case SKSE::MessagingInterface::kDataLoaded:
             if (IEDRuntimeHook::Install()) {
                 SKSE::log::info(
-                    "IED integration mode: official Papyrus Custom Item API + source-aligned per-proxy ProcessSlots suppression");
+                    "IED integration mode: official Papyrus Custom Item API + runtime-calibrated exact-Actor per-proxy ProcessSlots suppression");
             } else {
                 SKSE::log::warn(
                     "IED ProcessSlots suppression unavailable; Custom Item synchronization remains active but normal IED NPC slots may also be visible");

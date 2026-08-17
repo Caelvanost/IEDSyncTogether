@@ -10,10 +10,12 @@ namespace IEDSyncTogether
         static bool Install();
         static bool IsInstalled() noexcept;
 
-        // Registers the transient Skyrim reference handle of a resolved STR
-        // proxy. The ProcessSlots hook reads only the source-verified first
-        // 32-bit handle field of IED's ProcessParams and never dereferences or
-        // reconstructs any other private IED structure.
+        // Registers the exact transient Actor* of a resolved STR proxy.
+        // v0.2.5 does not assume IED's private Game::ObjectRefHandle ABI.
+        // The ProcessSlots wrapper first calibrates the Actor* field location
+        // from repeated PlayerCharacter evaluations, then suppresses only an
+        // exact tracked proxy pointer. The local PlayerCharacter is explicitly
+        // excluded from suppression.
         static void TrackRemoteProxy(
             RE::FormID formID,
             RE::Actor* actor,
