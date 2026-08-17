@@ -28,9 +28,9 @@ namespace
         switch (message->type) {
         case SKSE::MessagingInterface::kDataLoaded:
             SKSE::log::info(
-                "IED integration mode: public Papyrus Custom Items + scene-graph placement capture; no ActorBlock probe and no IED runtime patch installed");
+                "IED integration mode: public Papyrus Custom Items + composed scene-graph Node Override capture; no ActorBlock probe and no IED runtime patch installed");
             SKSE::log::info(
-                "IED v0.4.0 placement sync: capturing effective gear-node parent + local position/rotation/scale for displayed slots");
+                "IED v0.4.0 placement sync: composing MOV/CME transforms to a stable skeleton anchor for every displayed slot");
             service.Start();
             diagnostics.Start();
             break;
