@@ -26,23 +26,15 @@ namespace IEDSyncTogether
             0x41, 0x54, 0x41, 0x55, 0x48, 0x83, 0xEC, 0x30
         };
 
-#pragma pack(push, 1)
-        // CALL site -> this relay -> JMP stock IED SelectSlotItem.
-        //
-        // This deliberately does not enter a C++ hook. The original CALL has
-        // already pushed ProcessSlots' return address; the relay preserves all
-        // argument registers and stack contents and tail-jumps to the official
-        // IED function. SelectSlotItem's RET therefore returns directly to the
-        // instruction after the original CALL, exactly as it did before patching.
-        struct AbsoluteJumpRelay
-        {
-            std::uint8_t jmp{ 0xFF };
-            std::uint8_t modrm{ 0x25 };
-            std::int32_t displacement{ 0 };
-            std::uint64_t target{ 0 };
-        };
-        static_assert(sizeof(AbsoluteJumpRelay) == 0xE);
+        // ProcessParams is an IED-private type. We deliberately do not declare
+        // its layout. The source-verified structure is much larger than this
+        // prefix and its CommonParams base stores the Actor* in the prefix. We
+        // only compare machine words against already-known STR proxy addresses;
+        // no candidate pointer is dereferenced.
+        constexpr std::size_t kProcessParamsProbeBytes = 0xA0;
+        constexpr std::size_t kMaxTrackedProxies = 16;
 
+#pragma pack(push, 1)
         struct RelativeCall
         {
             std::uint8_t opcode{ 0xE8 };
@@ -51,7 +43,20 @@ namespace IEDSyncTogether
         static_assert(sizeof(RelativeCall) == 0x5);
 #pragma pack(pop)
 
+        struct TrackedProxy
+        {
+            std::atomic<std::uintptr_t> actor{ 0 };
+            std::atomic<RE::FormID> formID{ 0 };
+            std::atomic_bool logged{ false };
+        };
+
+        struct RelayStorage
+        {
+            std::array<std::uint8_t, 128> code{};
+        };
+
         SKSE::Trampoline g_iedTrampoline{ "IEDSyncTogether.IED" };
+        std::array<TrackedProxy, kMaxTrackedProxies> g_trackedProxies{};
         bool g_installed{ false };
 
         bool MatchBytes(std::uintptr_t address, const auto& expected) noexcept
@@ -79,6 +84,119 @@ namespace IEDSyncTogether
             out = static_cast<std::int32_t>(displacement);
             return true;
         }
+
+        bool ShouldSuppressStockSlots(const void* processParams) noexcept
+        {
+            if (!processParams) {
+                return false;
+            }
+
+            const auto* bytes = static_cast<const std::byte*>(processParams);
+            for (std::size_t offset = 0;
+                 offset + sizeof(std::uintptr_t) <= kProcessParamsProbeBytes;
+                 offset += sizeof(std::uintptr_t)) {
+                std::uintptr_t candidate = 0;
+                std::memcpy(&candidate, bytes + offset, sizeof(candidate));
+                if (!candidate) {
+                    continue;
+                }
+
+                for (auto& tracked : g_trackedProxies) {
+                    const auto actor = tracked.actor.load(std::memory_order_acquire);
+                    if (!actor || candidate != actor) {
+                        continue;
+                    }
+
+                    if (!tracked.logged.exchange(true, std::memory_order_acq_rel)) {
+                        SKSE::log::info(
+                            "IED stock-slot suppression active: proxy={:08X} actor=0x{:X}",
+                            tracked.formID.load(std::memory_order_relaxed),
+                            actor);
+                    }
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        std::size_t BuildRelay(
+            std::uint8_t* code,
+            std::uintptr_t helper,
+            std::uintptr_t stockTarget)
+        {
+            std::size_t offset = 0;
+
+            const auto emit = [&](std::initializer_list<std::uint8_t> bytes) mutable {
+                for (const auto byte : bytes) {
+                    code[offset++] = byte;
+                }
+            };
+            const auto emit64 = [&](std::uint64_t value) mutable {
+                std::memcpy(code + offset, &value, sizeof(value));
+                offset += sizeof(value);
+            };
+
+            // Preserve the original SelectSlotItem argument registers and RAX.
+            // Seven pushes move RSP from 8 mod 16 to 0 mod 16; the helper call
+            // then gets the required 32-byte Windows x64 shadow space.
+            emit({ 0x50 });             // push rax
+            emit({ 0x51 });             // push rcx
+            emit({ 0x52 });             // push rdx
+            emit({ 0x41, 0x50 });       // push r8
+            emit({ 0x41, 0x51 });       // push r9
+            emit({ 0x41, 0x52 });       // push r10
+            emit({ 0x41, 0x53 });       // push r11
+            emit({ 0x48, 0x83, 0xEC, 0x20 });  // sub rsp, 20h
+
+            emit({ 0x48, 0x89, 0xD1 }); // mov rcx, rdx (ProcessParams*)
+            emit({ 0x48, 0xB8 });       // mov rax, imm64
+            emit64(helper);
+            emit({ 0xFF, 0xD0 });       // call rax
+            emit({ 0x48, 0x83, 0xC4, 0x20 });  // add rsp, 20h
+            emit({ 0x84, 0xC0 });       // test al, al
+
+            emit({ 0x75, 0x00 });       // jne suppress
+            const auto suppressJumpDisp = offset - 1;
+
+            // Passthrough path: restore the incoming state and tail-jump to the
+            // exact official IED SelectSlotItem implementation. The indirect
+            // RIP-relative jump leaves every argument register untouched.
+            emit({ 0x41, 0x5B });       // pop r11
+            emit({ 0x41, 0x5A });       // pop r10
+            emit({ 0x41, 0x59 });       // pop r9
+            emit({ 0x41, 0x58 });       // pop r8
+            emit({ 0x5A });             // pop rdx
+            emit({ 0x59 });             // pop rcx
+            emit({ 0x58 });             // pop rax
+            emit({ 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00 }); // jmp [rip+0]
+            emit64(stockTarget);
+
+            const auto suppressOffset = offset;
+            const auto displacement = static_cast<std::ptrdiff_t>(suppressOffset) -
+                                      static_cast<std::ptrdiff_t>(suppressJumpDisp + 1);
+            if (displacement < (std::numeric_limits<std::int8_t>::min)() ||
+                displacement > (std::numeric_limits<std::int8_t>::max)()) {
+                return 0;
+            }
+            code[suppressJumpDisp] = static_cast<std::uint8_t>(
+                static_cast<std::int8_t>(displacement));
+
+            // Suppressed path: behave exactly like SelectSlotItem returning
+            // nullptr. ProcessSlots will remove its stock slot entry, while the
+            // subsequent ProcessCustom pass remains untouched.
+            emit({ 0x41, 0x5B });       // pop r11
+            emit({ 0x41, 0x5A });       // pop r10
+            emit({ 0x41, 0x59 });       // pop r9
+            emit({ 0x41, 0x58 });       // pop r8
+            emit({ 0x5A });             // pop rdx
+            emit({ 0x59 });             // pop rcx
+            emit({ 0x58 });             // pop rax
+            emit({ 0x31, 0xC0 });       // xor eax, eax
+            emit({ 0xC3 });             // ret
+
+            return offset;
+        }
     }
 
     bool IEDRuntimeHook::Install()
@@ -89,7 +207,7 @@ namespace IEDSyncTogether
 
         const auto module = GetModuleHandleW(L"ImmersiveEquipmentDisplays.dll");
         if (!module) {
-            SKSE::log::critical("IED transparent shim: ImmersiveEquipmentDisplays.dll is not loaded");
+            SKSE::log::critical("IED stock-slot shim: ImmersiveEquipmentDisplays.dll is not loaded");
             return false;
         }
 
@@ -99,14 +217,14 @@ namespace IEDSyncTogether
 
         if (!MatchBytes(callSite, kExpectedCall)) {
             SKSE::log::critical(
-                "IED transparent shim: unsupported IED build (SelectSlotItem call signature mismatch at RVA 0x{:X})",
+                "IED stock-slot shim: unsupported IED build (SelectSlotItem call signature mismatch at RVA 0x{:X})",
                 kSelectSlotItemCallRva);
             return false;
         }
 
         if (!MatchBytes(selectSlotItem, kExpectedSelectSlotItemPrologue)) {
             SKSE::log::critical(
-                "IED transparent shim: unsupported IED build (SelectSlotItem signature mismatch at RVA 0x{:X})",
+                "IED stock-slot shim: unsupported IED build (SelectSlotItem signature mismatch at RVA 0x{:X})",
                 kSelectSlotItemRva);
             return false;
         }
@@ -119,28 +237,31 @@ namespace IEDSyncTogether
         const auto originalTarget = callSite + sizeof(RelativeCall) + originalDisplacement;
         if (originalTarget != selectSlotItem) {
             SKSE::log::critical(
-                "IED transparent shim: call target mismatch (expected RVA 0x{:X})",
+                "IED stock-slot shim: call target mismatch (expected RVA 0x{:X})",
                 kSelectSlotItemRva);
             return false;
         }
 
-        // A 5-byte x64 CALL can only reach +/-2 GiB. Allocate a tiny relay near
-        // IED, then make that relay tail-jump straight to the official function.
-        // No private IED ABI is re-declared or interpreted in this version.
         const auto searchCenter = callSite + kTrampolineSearchBias;
         g_iedTrampoline.create(
-            64,
+            256,
             reinterpret_cast<void*>(searchCenter));
 
-        auto* relay = g_iedTrampoline.allocate<AbsoluteJumpRelay>();
-        *relay = AbsoluteJumpRelay{};
-        relay->target = static_cast<std::uint64_t>(selectSlotItem);
+        auto* storage = g_iedTrampoline.allocate<RelayStorage>();
+        const auto relaySize = BuildRelay(
+            storage->code.data(),
+            reinterpret_cast<std::uintptr_t>(&ShouldSuppressStockSlots),
+            selectSlotItem);
+        if (relaySize == 0 || relaySize > storage->code.size()) {
+            SKSE::log::critical("IED stock-slot shim: failed to build relay");
+            return false;
+        }
 
         std::int32_t relayDisplacement = 0;
-        const auto relayAddress = reinterpret_cast<std::uintptr_t>(relay);
+        const auto relayAddress = reinterpret_cast<std::uintptr_t>(storage->code.data());
         if (!GetRelative32(callSite + sizeof(RelativeCall), relayAddress, relayDisplacement)) {
             SKSE::log::critical(
-                "IED transparent shim: allocated relay is outside rel32 range (call=0x{:X}, relay=0x{:X})",
+                "IED stock-slot shim: allocated relay is outside rel32 range (call=0x{:X}, relay=0x{:X})",
                 callSite,
                 relayAddress);
             return false;
@@ -152,7 +273,7 @@ namespace IEDSyncTogether
         g_installed = true;
 
         SKSE::log::info(
-            "IED 1.7.4 transparent shim installed: call RVA=0x{:X} -> relay=0x{:X} -> stock SelectSlotItem RVA=0x{:X}; no C++ ABI hook active",
+            "IED 1.7.4 proxy stock-slot shim installed: call RVA=0x{:X} relay=0x{:X} stock SelectSlotItem RVA=0x{:X}; official DLL unchanged on disk",
             kSelectSlotItemCallRva,
             relayAddress,
             kSelectSlotItemRva);
@@ -162,5 +283,69 @@ namespace IEDSyncTogether
     bool IEDRuntimeHook::IsInstalled() noexcept
     {
         return g_installed;
+    }
+
+    void IEDRuntimeHook::TrackRemoteProxy(
+        RE::FormID formID,
+        RE::Actor* actor,
+        bool tracked) noexcept
+    {
+        const auto address = reinterpret_cast<std::uintptr_t>(actor);
+
+        if (!tracked) {
+            for (auto& entry : g_trackedProxies) {
+                const auto storedFormID = entry.formID.load(std::memory_order_acquire);
+                const auto storedActor = entry.actor.load(std::memory_order_acquire);
+                if ((formID != 0 && storedFormID == formID) ||
+                    (address != 0 && storedActor == address)) {
+                    entry.actor.store(0, std::memory_order_release);
+                    entry.formID.store(0, std::memory_order_release);
+                    entry.logged.store(false, std::memory_order_release);
+                }
+            }
+            return;
+        }
+
+        if (!actor || formID == 0) {
+            return;
+        }
+
+        for (auto& entry : g_trackedProxies) {
+            if (entry.formID.load(std::memory_order_acquire) == formID) {
+                entry.logged.store(false, std::memory_order_release);
+                entry.actor.store(address, std::memory_order_release);
+                return;
+            }
+        }
+
+        for (auto& entry : g_trackedProxies) {
+            std::uintptr_t expected = 0;
+            if (entry.actor.compare_exchange_strong(
+                    expected,
+                    address,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                entry.formID.store(formID, std::memory_order_release);
+                entry.logged.store(false, std::memory_order_release);
+                SKSE::log::debug(
+                    "IED stock-slot suppression armed: proxy={:08X} actor=0x{:X}",
+                    formID,
+                    address);
+                return;
+            }
+        }
+
+        SKSE::log::error(
+            "IED stock-slot suppression table full; proxy {:08X} will keep stock IED slots",
+            formID);
+    }
+
+    void IEDRuntimeHook::ClearTrackedProxies() noexcept
+    {
+        for (auto& entry : g_trackedProxies) {
+            entry.actor.store(0, std::memory_order_release);
+            entry.formID.store(0, std::memory_order_release);
+            entry.logged.store(false, std::memory_order_release);
+        }
     }
 }
