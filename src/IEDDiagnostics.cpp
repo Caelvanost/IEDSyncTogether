@@ -66,7 +66,7 @@ namespace IEDSyncTogether
         LogIEDSettings();
         _timer = std::jthread([this](std::stop_token token) { TimerLoop(token); });
         SKSE::log::info(
-            "IED v0.3.2 diagnostics started: read-only IED settings + STR proxy PlayerCharacter classification");
+            "IED v0.3.3 diagnostics started: read-only IED settings + STR proxy PlayerCharacter classification");
     }
 
     void IEDDiagnostics::Stop()
@@ -163,9 +163,10 @@ namespace IEDSyncTogether
             return;
         }
 
-        const std::string document(
-            std::istreambuf_iterator<char>(input),
-            std::istreambuf_iterator<char>());
+        const std::string document{
+            std::istreambuf_iterator<char>{ input },
+            std::istreambuf_iterator<char>{}
+        };
 
         const auto disableNpcSlots = ParseBooleanSetting(document, kDisableNpcSlotsKey);
         if (!disableNpcSlots) {
