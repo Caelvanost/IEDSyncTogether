@@ -11,10 +11,6 @@ namespace IEDSyncTogether
     {
         constexpr std::uintptr_t kSelectSlotItemCallRva = 0xE3806;
         constexpr std::uintptr_t kSelectSlotItemRva = 0x146360;
-
-        // CommonLib searches a +/-2 GiB window around the address passed to
-        // Trampoline::create(). Bias the search 1 GiB above the IED call-site,
-        // so its low-to-high allocator starts comfortably inside rel32 range.
         constexpr std::uintptr_t kTrampolineSearchBias = 0x40000000ull;
 
         constexpr std::array<std::uint8_t, 5> kExpectedCall{
@@ -127,12 +123,12 @@ namespace IEDSyncTogether
         {
             std::size_t offset = 0;
 
-            const auto emit = [&](std::initializer_list<std::uint8_t> bytes) mutable {
+            auto emit = [&](std::initializer_list<std::uint8_t> bytes) {
                 for (const auto byte : bytes) {
                     code[offset++] = byte;
                 }
             };
-            const auto emit64 = [&](std::uint64_t value) mutable {
+            auto emit64 = [&](std::uint64_t value) {
                 std::memcpy(code + offset, &value, sizeof(value));
                 offset += sizeof(value);
             };
@@ -140,36 +136,35 @@ namespace IEDSyncTogether
             // Preserve the original SelectSlotItem argument registers and RAX.
             // Seven pushes move RSP from 8 mod 16 to 0 mod 16; the helper call
             // then gets the required 32-byte Windows x64 shadow space.
-            emit({ 0x50 });             // push rax
-            emit({ 0x51 });             // push rcx
-            emit({ 0x52 });             // push rdx
-            emit({ 0x41, 0x50 });       // push r8
-            emit({ 0x41, 0x51 });       // push r9
-            emit({ 0x41, 0x52 });       // push r10
-            emit({ 0x41, 0x53 });       // push r11
-            emit({ 0x48, 0x83, 0xEC, 0x20 });  // sub rsp, 20h
+            emit({ 0x50 });
+            emit({ 0x51 });
+            emit({ 0x52 });
+            emit({ 0x41, 0x50 });
+            emit({ 0x41, 0x51 });
+            emit({ 0x41, 0x52 });
+            emit({ 0x41, 0x53 });
+            emit({ 0x48, 0x83, 0xEC, 0x20 });
 
             emit({ 0x48, 0x89, 0xD1 }); // mov rcx, rdx (ProcessParams*)
-            emit({ 0x48, 0xB8 });       // mov rax, imm64
+            emit({ 0x48, 0xB8 });
             emit64(helper);
-            emit({ 0xFF, 0xD0 });       // call rax
-            emit({ 0x48, 0x83, 0xC4, 0x20 });  // add rsp, 20h
-            emit({ 0x84, 0xC0 });       // test al, al
+            emit({ 0xFF, 0xD0 });
+            emit({ 0x48, 0x83, 0xC4, 0x20 });
+            emit({ 0x84, 0xC0 });
 
-            emit({ 0x75, 0x00 });       // jne suppress
+            emit({ 0x75, 0x00 });
             const auto suppressJumpDisp = offset - 1;
 
-            // Passthrough path: restore the incoming state and tail-jump to the
-            // exact official IED SelectSlotItem implementation. The indirect
-            // RIP-relative jump leaves every argument register untouched.
-            emit({ 0x41, 0x5B });       // pop r11
-            emit({ 0x41, 0x5A });       // pop r10
-            emit({ 0x41, 0x59 });       // pop r9
-            emit({ 0x41, 0x58 });       // pop r8
-            emit({ 0x5A });             // pop rdx
-            emit({ 0x59 });             // pop rcx
-            emit({ 0x58 });             // pop rax
-            emit({ 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00 }); // jmp [rip+0]
+            // Passthrough: restore everything and tail-jump to the exact stock
+            // IED function. The RIP-indirect jump does not consume a register.
+            emit({ 0x41, 0x5B });
+            emit({ 0x41, 0x5A });
+            emit({ 0x41, 0x59 });
+            emit({ 0x41, 0x58 });
+            emit({ 0x5A });
+            emit({ 0x59 });
+            emit({ 0x58 });
+            emit({ 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00 });
             emit64(stockTarget);
 
             const auto suppressOffset = offset;
@@ -182,18 +177,18 @@ namespace IEDSyncTogether
             code[suppressJumpDisp] = static_cast<std::uint8_t>(
                 static_cast<std::int8_t>(displacement));
 
-            // Suppressed path: behave exactly like SelectSlotItem returning
-            // nullptr. ProcessSlots will remove its stock slot entry, while the
-            // subsequent ProcessCustom pass remains untouched.
-            emit({ 0x41, 0x5B });       // pop r11
-            emit({ 0x41, 0x5A });       // pop r10
-            emit({ 0x41, 0x59 });       // pop r9
-            emit({ 0x41, 0x58 });       // pop r8
-            emit({ 0x5A });             // pop rdx
-            emit({ 0x59 });             // pop rcx
-            emit({ 0x58 });             // pop rax
-            emit({ 0x31, 0xC0 });       // xor eax, eax
-            emit({ 0xC3 });             // ret
+            // Suppressed: restore the caller state and return nullptr. The
+            // surrounding ProcessSlots removes its stock entry; ProcessCustom
+            // is executed afterwards by IED and remains completely untouched.
+            emit({ 0x41, 0x5B });
+            emit({ 0x41, 0x5A });
+            emit({ 0x41, 0x59 });
+            emit({ 0x41, 0x58 });
+            emit({ 0x5A });
+            emit({ 0x59 });
+            emit({ 0x58 });
+            emit({ 0x31, 0xC0 });
+            emit({ 0xC3 });
 
             return offset;
         }
