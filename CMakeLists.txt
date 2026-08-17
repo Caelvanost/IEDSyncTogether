@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
     IEDSyncTogether
-    VERSION 0.3.0
+    VERSION 0.3.1
     LANGUAGES CXX
 )
 
@@ -15,6 +15,8 @@ add_commonlibsse_plugin(${PROJECT_NAME}
     SOURCES
         src/PCH.h
         src/main.cpp
+        src/ActorBlockProbe.cpp
+        src/ActorBlockProbe.h
         src/Config.cpp
         src/Config.h
         src/FormIdentity.cpp

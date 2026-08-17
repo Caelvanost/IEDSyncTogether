@@ -1,5 +1,6 @@
 #include "PCH.h"
 
+#include "ActorBlockProbe.h"
 #include "IEDBridge.h"
 #include "IEDSyncTogether/Interface.h"
 #include "SyncService.h"
@@ -26,21 +27,24 @@ namespace
     {
         using namespace IEDSyncTogether;
         auto& service = SyncService::GetSingleton();
+        auto& actorBlockProbe = ActorBlockProbe::GetSingleton();
 
         switch (message->type) {
         case SKSE::MessagingInterface::kDataLoaded:
-            // All IED integration goes through the public Papyrus API shipped
-            // by official Immersive Equipment Displays 1.7.4. v0.3.0 uses
-            // IED's own global NPC-slot suppression as the development
-            // baseline instead of intercepting any private IED runtime code.
+            // v0.3.1 keeps the validated public Papyrus Custom Item renderer.
+            // A separate probe reasserts IED.AddActorBlock on resolved STR
+            // proxies so we can determine whether IED can suppress stock NPC
+            // equipment without also hiding IEDSyncTogether Custom Items.
             SKSE::log::info(
-                "IED integration mode: official Papyrus Custom Item API; no IED runtime patch installed");
-            SKSE::log::warn(
-                "IED v0.3.0 baseline: enable \"Disable NPC equipment displays\" in IED on every STR client to prevent stock NPC slot duplication while remote Custom Item restitution is developed");
+                "IED integration mode: official Papyrus Custom Item API + public ActorBlock probe; no IED runtime patch installed");
+            SKSE::log::info(
+                "IED v0.3.1 probe: AddActorBlock will be applied only to resolved STR proxies when SuppressRemoteNpcDisplays=1");
             service.Start();
+            actorBlockProbe.Start();
             break;
 
         case SKSE::MessagingInterface::kPreLoadGame:
+            actorBlockProbe.Reset();
             // IED custom entries are save-persistent. Clear every proxy still
             // owned by this runtime before the VM swaps to another save.
             IEDBridge::GetSingleton().ResetRemoteRendering();

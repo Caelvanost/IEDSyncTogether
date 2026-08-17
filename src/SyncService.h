@@ -22,6 +22,25 @@ namespace IEDSyncTogether
             std::uint32_t slotIndex,
             RE::FormID& outFormID) const;
 
+        [[nodiscard]] bool IsRemoteNpcSuppressionEnabled() const noexcept
+        {
+            return _config.suppressRemoteNpcDisplays;
+        }
+
+        [[nodiscard]] std::vector<RE::FormID> GetResolvedRemoteProxies() const
+        {
+            std::vector<RE::FormID> result;
+            std::scoped_lock lock(_peerStateMutex);
+            result.reserve(_knownPeers.size());
+            for (const auto& [peerID, peer] : _knownPeers) {
+                (void)peerID;
+                if (peer.currentProxy != 0) {
+                    result.push_back(peer.currentProxy);
+                }
+            }
+            return result;
+        }
+
     private:
         struct RemoteSnapshot
         {
