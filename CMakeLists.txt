@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
     IEDSyncTogether
-    VERSION 0.2.1
+    VERSION 0.2.2
     LANGUAGES CXX
 )
 
@@ -21,6 +21,8 @@ add_commonlibsse_plugin(${PROJECT_NAME}
         src/FormIdentity.h
         src/IEDBridge.cpp
         src/IEDBridge.h
+        src/IEDRuntimeHook.cpp
+        src/IEDRuntimeHook.h
         src/ProxyResolver.cpp
         src/ProxyResolver.h
         src/UdpTransport.cpp
