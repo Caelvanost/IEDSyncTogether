@@ -66,7 +66,7 @@ namespace IEDSyncTogether
         LogIEDSettings();
         _timer = std::jthread([this](std::stop_token token) { TimerLoop(token); });
         SKSE::log::info(
-            "IED v0.3.3 diagnostics started: read-only IED settings + STR proxy PlayerCharacter classification");
+            "IED v0.4.0 diagnostics started: read-only IED settings + STR proxy PlayerCharacter classification");
     }
 
     void IEDDiagnostics::Stop()
