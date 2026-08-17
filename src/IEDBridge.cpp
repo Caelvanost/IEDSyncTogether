@@ -1,7 +1,8 @@
 #include "PCH.h"
 #include "IEDBridge.h"
 
-#include "IEDRuntimeHook.h"
+#include "IEDSyncTogether/Interface.h"
+#include "SyncService.h"
 
 #include <RE/F/FunctionArguments.h>
 #include <RE/I/IStackCallbackFunctor.h>
@@ -14,7 +15,47 @@ namespace IEDSyncTogether
     {
         constexpr std::string_view kPapyrusClass = "IED";
         constexpr std::string_view kPluginKey = "IEDSyncTogether.esp";
+
+        constexpr std::array<std::string_view, 19> kSlotNodes{
+            "WeaponSword",
+            "WeaponSwordLeft",
+            "WeaponAxe",
+            "WeaponAxeLeft",
+            "WeaponBack",
+            "WeaponBackLeft",
+            "WeaponBackAxeMace",
+            "WeaponBackAxeMaceLeft",
+            "WeaponDagger",
+            "WeaponDaggerLeft",
+            "WeaponMace",
+            "WeaponMaceLeft",
+            "WeaponStaff",
+            "WeaponStaffLeft",
+            "WeaponBow",
+            "WeaponCrossBow",
+            "Shield",
+            "Shield",
+            "Quiver"
+        };
+
+        constexpr std::array<bool, 19> kLeftWeaponSlots{
+            false, true,
+            false, true,
+            false, true,
+            false, true,
+            false, true,
+            false, true,
+            false, true,
+            false, false,
+            false, false, false
+        };
+
+        using RemoteFormState = std::array<RE::FormID, 19>;
+
         std::atomic_bool g_firstCaptureStarted{ false };
+        std::mutex g_remoteMutex;
+        std::unordered_set<RE::FormID> g_trackedRemoteProxies;
+        std::unordered_map<RE::FormID, RemoteFormState> g_appliedRemoteStates;
 
         struct CaptureRequest
         {
@@ -34,6 +75,206 @@ namespace IEDSyncTogether
         {
             auto* skyrimVM = RE::SkyrimVM::GetSingleton();
             return skyrimVM && skyrimVM->impl ? skyrimVM->impl.get() : nullptr;
+        }
+
+        template <class... Args>
+        bool DispatchNoResult(std::string_view functionName, Args&&... args)
+        {
+            auto* vm = GetVM();
+            if (!vm) {
+                return false;
+            }
+
+            RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> callback;
+            return vm->DispatchStaticCall(
+                RE::BSFixedString(kPapyrusClass.data()),
+                RE::BSFixedString(functionName.data()),
+                RE::MakeFunctionArguments(std::forward<Args>(args)...),
+                callback);
+        }
+
+        void ClearRemoteCustomItems(RE::Actor* actor)
+        {
+            if (!actor) {
+                return;
+            }
+
+            // v0.1.x may have left this actor blocked in IED. Always remove our
+            // historical block before touching Custom Items.
+            DispatchNoResult(
+                "RemoveActorBlock",
+                static_cast<RE::Actor*>(actor),
+                std::string(kPluginKey));
+            DispatchNoResult(
+                "DeleteAllActor",
+                static_cast<RE::Actor*>(actor),
+                std::string(kPluginKey));
+            DispatchNoResult(
+                "Evaluate",
+                static_cast<RE::Actor*>(actor));
+        }
+
+        bool ApplyRemoteCustomItems(
+            RE::Actor* actor,
+            const RemoteFormState& forms)
+        {
+            if (!actor || !GetVM()) {
+                return false;
+            }
+
+            bool dispatched = true;
+            std::size_t visible = 0;
+
+            // Custom items persist in the save, so every authoritative update
+            // first clears the entries owned by our own lightweight ESP.
+            dispatched &= DispatchNoResult(
+                "RemoveActorBlock",
+                static_cast<RE::Actor*>(actor),
+                std::string(kPluginKey));
+            dispatched &= DispatchNoResult(
+                "DeleteAllActor",
+                static_cast<RE::Actor*>(actor),
+                std::string(kPluginKey));
+
+            for (std::size_t slot = 0; slot < forms.size(); ++slot) {
+                const auto formID = forms[slot];
+                if (formID == 0) {
+                    continue;
+                }
+
+                auto* form = RE::TESForm::LookupByID(formID);
+                if (!form) {
+                    SKSE::log::warn(
+                        "IED custom render skipped unresolved form: proxy={:08X} slot={} form={:08X}",
+                        actor->GetFormID(),
+                        slot,
+                        formID);
+                    continue;
+                }
+
+                ++visible;
+                const auto name = fmt::format("remote-slot-{:02}", slot);
+                const auto node = std::string(kSlotNodes[slot]);
+
+                // Create as a non-inventory form: this is the crucial part for
+                // STR proxies, which do not necessarily own the remote player's
+                // real inventory entry. IED loads the form model directly.
+                dispatched &= DispatchNoResult(
+                    "CreateItemActor",
+                    static_cast<RE::Actor*>(actor),
+                    std::string(kPluginKey),
+                    name,
+                    false,
+                    form,
+                    false,
+                    node);
+
+                // CreateItemActor initializes one sex variant. Mirror the form to
+                // the other variant so proxy sex changes/recreation are harmless.
+                dispatched &= DispatchNoResult(
+                    "SetItemFormActor",
+                    static_cast<RE::Actor*>(actor),
+                    std::string(kPluginKey),
+                    name,
+                    true,
+                    form);
+
+                if (kLeftWeaponSlots[slot]) {
+                    dispatched &= DispatchNoResult(
+                        "SetItemLeftWeaponActor",
+                        static_cast<RE::Actor*>(actor),
+                        std::string(kPluginKey),
+                        name,
+                        false,
+                        true);
+                    dispatched &= DispatchNoResult(
+                        "SetItemLeftWeaponActor",
+                        static_cast<RE::Actor*>(actor),
+                        std::string(kPluginKey),
+                        name,
+                        true,
+                        true);
+                }
+
+                dispatched &= DispatchNoResult(
+                    "SetItemEnabledActor",
+                    static_cast<RE::Actor*>(actor),
+                    std::string(kPluginKey),
+                    name,
+                    false,
+                    true);
+                dispatched &= DispatchNoResult(
+                    "SetItemEnabledActor",
+                    static_cast<RE::Actor*>(actor),
+                    std::string(kPluginKey),
+                    name,
+                    true,
+                    true);
+            }
+
+            dispatched &= DispatchNoResult(
+                "Evaluate",
+                static_cast<RE::Actor*>(actor));
+
+            SKSE::log::info(
+                "IED Custom Item render queued: proxy={:08X} slots={} dispatchAccepted={}",
+                actor->GetFormID(),
+                visible,
+                dispatched ? 1 : 0);
+            return dispatched;
+        }
+
+        void RefreshTrackedRemoteProxies()
+        {
+            std::vector<RE::FormID> proxies;
+            {
+                std::scoped_lock lock(g_remoteMutex);
+                proxies.assign(g_trackedRemoteProxies.begin(), g_trackedRemoteProxies.end());
+            }
+
+            for (const auto proxyFormID : proxies) {
+                auto* form = RE::TESForm::LookupByID(proxyFormID);
+                auto* actor = form ? form->As<RE::Actor>() : nullptr;
+                if (!actor) {
+                    continue;
+                }
+
+                RemoteFormState desired{};
+                bool matched = false;
+                for (std::size_t slot = 0; slot < desired.size(); ++slot) {
+                    RE::FormID remoteFormID = 0;
+                    const auto result = SyncService::GetSingleton().QueryRemoteSlot(
+                        proxyFormID,
+                        static_cast<std::uint32_t>(slot),
+                        remoteFormID);
+
+                    if (result == static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kForm)) {
+                        desired[slot] = remoteFormID;
+                        matched = true;
+                    } else if (result == static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kEmpty)) {
+                        matched = true;
+                    }
+                }
+
+                if (!matched) {
+                    continue;
+                }
+
+                bool changed = true;
+                {
+                    std::scoped_lock lock(g_remoteMutex);
+                    const auto iterator = g_appliedRemoteStates.find(proxyFormID);
+                    changed = iterator == g_appliedRemoteStates.end() || iterator->second != desired;
+                }
+                if (!changed) {
+                    continue;
+                }
+
+                if (ApplyRemoteCustomItems(actor, desired)) {
+                    std::scoped_lock lock(g_remoteMutex);
+                    g_appliedRemoteStates[proxyFormID] = desired;
+                }
+            }
         }
 
         void DispatchCaptureSlot(
@@ -182,11 +423,14 @@ namespace IEDSyncTogether
             return false;
         }
 
+        // Apply the latest authoritative remote state from the previous network
+        // tick before starting another local capture.
+        RefreshTrackedRemoteProxies();
+
         const bool diagnostic = !g_firstCaptureStarted.exchange(true);
         if (diagnostic) {
             SKSE::log::info(
-                "First IED capture: early runtime hook installed={} ; starting sequential 19-slot capture player={:08X}",
-                IEDRuntimeHook::IsInstalled() ? 1 : 0,
+                "First IED capture: official Papyrus API active; starting sequential 19-slot capture player={:08X}",
                 player->GetFormID());
         }
 
@@ -199,18 +443,34 @@ namespace IEDSyncTogether
 
     bool IEDBridge::SetActorBlocked(RE::Actor* actor, bool blocked) const
     {
-        auto* vm = GetVM();
-        if (!actor || !vm || !IsInstalled()) {
+        if (!actor || !GetVM() || !IsInstalled()) {
             return false;
         }
 
-        RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> callback;
-        return vm->DispatchStaticCall(
-            RE::BSFixedString(kPapyrusClass.data()),
-            RE::BSFixedString(blocked ? "AddActorBlock" : "RemoveActorBlock"),
-            RE::MakeFunctionArguments(
+        const auto formID = actor->GetFormID();
+        if (blocked) {
+            // Historical SyncService contract: "blocked" now means that this
+            // resolved STR proxy is owned by our authoritative Custom Item path.
+            // Explicitly undo any block left by a v0.1.x session/save first.
+            DispatchNoResult(
+                "RemoveActorBlock",
                 static_cast<RE::Actor*>(actor),
-                std::string(kPluginKey)),
-            callback);
+                std::string(kPluginKey));
+            {
+                std::scoped_lock lock(g_remoteMutex);
+                g_trackedRemoteProxies.insert(formID);
+                g_appliedRemoteStates.erase(formID);
+            }
+            RefreshTrackedRemoteProxies();
+            return true;
+        }
+
+        {
+            std::scoped_lock lock(g_remoteMutex);
+            g_trackedRemoteProxies.erase(formID);
+            g_appliedRemoteStates.erase(formID);
+        }
+        ClearRemoteCustomItems(actor);
+        return true;
     }
 }

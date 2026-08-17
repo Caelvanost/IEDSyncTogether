@@ -1,6 +1,5 @@
 #include "PCH.h"
 
-#include "IEDRuntimeHook.h"
 #include "IEDSyncTogether/Interface.h"
 #include "SyncService.h"
 
@@ -29,15 +28,10 @@ namespace
 
         switch (message->type) {
         case SKSE::MessagingInterface::kDataLoaded:
-            // Diagnostic v0.1.13: patch IED's fixed 1.7.4 call-site through a
-            // register/stack-transparent relay that tail-jumps straight back to
-            // stock SelectSlotItem. No C++ hook participates in the IED call ABI.
-            // If save loading remains stable, later versions can extend this relay
-            // incrementally instead of reintroducing the crashing wrapper.
-            if (!IEDRuntimeHook::Install()) {
-                SKSE::log::error(
-                    "IED transparent shim unavailable; IED remains unmodified");
-            }
+            // v0.2.0 intentionally performs no binary patching of IED. All IED
+            // integration goes through the native Papyrus API shipped by the
+            // official Immersive Equipment Displays 1.7.4 DLL.
+            SKSE::log::info("IED integration mode: official Papyrus API; no IED runtime patch installed");
             service.Start();
             break;
 
