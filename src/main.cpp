@@ -29,10 +29,14 @@ namespace
 
         switch (message->type) {
         case SKSE::MessagingInterface::kDataLoaded:
-            // v0.2.0 intentionally performs no binary patching of IED. All IED
-            // integration goes through the native Papyrus API shipped by the
-            // official Immersive Equipment Displays 1.7.4 DLL.
-            SKSE::log::info("IED integration mode: official Papyrus API; no IED runtime patch installed");
+            // All IED integration goes through the public Papyrus API shipped
+            // by official Immersive Equipment Displays 1.7.4. v0.3.0 uses
+            // IED's own global NPC-slot suppression as the development
+            // baseline instead of intercepting any private IED runtime code.
+            SKSE::log::info(
+                "IED integration mode: official Papyrus Custom Item API; no IED runtime patch installed");
+            SKSE::log::warn(
+                "IED v0.3.0 baseline: enable \"Disable NPC equipment displays\" in IED on every STR client to prevent stock NPC slot duplication while remote Custom Item restitution is developed");
             service.Start();
             break;
 
