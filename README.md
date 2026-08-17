@@ -6,15 +6,18 @@ Compatibility and synchronization layer between Immersive Equipment Displays (IE
 
 STR represents remote players as dynamically created actor proxies. IEDSyncTogether captures the 19 forms actually displayed by IED on the owning client, exchanges stable `plugin + local FormID` identities over the LAN, binds the remote state to the matching STR proxy, and reproduces that display state locally without changing STR inventory or equipment.
 
-## v0.2.0: official IED API renderer
+## v0.2.1: official IED API renderer
 
-v0.2.0 removes the active binary hook path entirely. The official `ImmersiveEquipmentDisplays.dll` 1.7.4 is never patched, rebuilt, replaced or redistributed.
+v0.2.1 keeps the official-I​ED renderer introduced in v0.2.0 and fixes the CommonLibSSE-NG Papyrus dispatch argument packing used by the Custom Item API. Arguments are now materialized as decayed values before `RE::MakeFunctionArguments`, avoiding unsupported reference types such as `const std::string&` and `RE::TESForm*&` during compilation.
 
-The renderer now uses native Papyrus functions already shipped by IED 1.7.4:
+The official `ImmersiveEquipmentDisplays.dll` 1.7.4 is never patched, rebuilt, replaced or redistributed.
+
+The renderer uses native Papyrus functions already shipped by IED 1.7.4:
 
 - `IED.GetSlottedForm` captures the 19 authoritative display slots on the owning player.
 - `IED.CreateItemActor` creates proxy-only Custom Items.
 - `IED.SetItemFormActor` mirrors the form to both sex variants.
+- `IED.SetItemNodeActor` mirrors the managed equipment node to both sex variants.
 - `IED.SetItemLeftWeaponActor` preserves left-hand weapon semantics where required.
 - `IED.SetItemEnabledActor` enables the generated entry.
 - `IED.DeleteAllActor` removes stale IEDSyncTogether entries before a changed snapshot is rebuilt.
@@ -66,7 +69,7 @@ proxy disappears / STR disconnect
     -> delete IEDSyncTogether Custom Items
 ```
 
-The legacy INI key `SuppressRemoteNpcDisplays` remains for compatibility. With the default value `1`, it now enables proxy ownership by the Custom Item renderer; v0.2.0 does not call `IED.AddActorBlock`.
+The legacy INI key `SuppressRemoteNpcDisplays` remains for compatibility. With the default value `1`, it now enables proxy ownership by the Custom Item renderer; v0.2.1 does not call `IED.AddActorBlock`.
 
 ## Building
 
@@ -79,7 +82,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build-vortex.ps1
 The archive name follows the version in `CMakeLists.txt`:
 
 ```text
-dist/IEDSyncTogether-v0.2.0.zip
+dist/IEDSyncTogether-v0.2.1.zip
 ```
 
 Expected relevant contents:
@@ -92,12 +95,12 @@ Data/SKSE/Plugins/IEDSyncTogether.ini
 
 The archive must **not** contain `ImmersiveEquipmentDisplays.dll`. Keep the official IED 1.7.4 installation enabled separately in Vortex.
 
-## First v0.2.0 test
+## First v0.2.1 test
 
-Install the same v0.2.0 archive on both STR clients. On Player1, verify `Documents/My Games/Skyrim Special Edition/SKSE/IEDSyncTogether.log` contains:
+Install the same v0.2.1 archive on both STR clients. On Player1, verify `Documents/My Games/Skyrim Special Edition/SKSE/IEDSyncTogether.log` contains:
 
 ```text
-IEDSyncTogether v0.2.0 loading
+IEDSyncTogether v0.2.1 loading
 IED integration mode: official Papyrus API; no IED runtime patch installed
 ```
 
@@ -107,7 +110,7 @@ After Player2 is bound and a remote snapshot has been received, look for:
 IED Custom Item render queued: proxy=XXXXXXXX slots=N dispatchAccepted=1
 ```
 
-For the current diagnostic case, Player2 previously sent `slots=1`. If exactly one object appears on Player2's proxy from Player1's point of view, the proxy renderer is validated. Any remaining mismatch in the number of objects is then a capture-side problem rather than a rendering problem.
+For the current diagnostic case, Elir has one IED-displayed slot because she has no equipped gear and only one favorited weapon. Receiving `slots=1` is therefore expected. If exactly one object appears on Elir's proxy from Player1's point of view, the proxy renderer is validated.
 
 ### Useful failure signals
 
@@ -117,7 +120,7 @@ For the current diagnostic case, Player2 previously sent `slots=1`. If exactly o
 
 ## Historical code
 
-`src/IEDRuntimeHook.*`, `integration/ied-dev/`, and `build-ied-patched.ps1` are retained only as development history/reference. They are not compiled or used by v0.2.0. The IED source tree remains useful for documenting the official 1.7.4 API, but its private/non-public build assets make rebuilding IED an unsupported dependency for this project.
+`src/IEDRuntimeHook.*`, `integration/ied-dev/`, and `build-ied-patched.ps1` are retained only as development history/reference. They are not compiled or used by v0.2.1. The IED source tree remains useful for documenting the official 1.7.4 API, but its private/non-public build assets make rebuilding IED an unsupported dependency for this project.
 
 ## License
 
