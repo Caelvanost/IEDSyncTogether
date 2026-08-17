@@ -22,6 +22,8 @@ namespace IEDSyncTogether
             std::uint32_t slotIndex,
             RE::FormID& outFormID) const;
 
+        // Read-only diagnostic accessors used by v0.3.2. They do not mutate
+        // proxy state, IED settings, STR inventory or equipment.
         [[nodiscard]] bool IsRemoteNpcSuppressionEnabled() const noexcept
         {
             return _config.suppressRemoteNpcDisplays;

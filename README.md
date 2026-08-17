@@ -6,41 +6,44 @@ Compatibility and synchronization layer between Immersive Equipment Displays (IE
 
 STR represents remote players as dynamically created actor proxies. IEDSyncTogether captures the 19 forms actually displayed by IED on the owning client, exchanges stable `plugin + local FormID` identities over the LAN, binds the remote state to the matching STR proxy, and reproduces that state locally without changing STR inventory or equipment.
 
-## v0.3.0: native IED NPC-slot baseline
+## v0.3.2: native IED diagnostics
 
-v0.3.0 establishes a safe development baseline for remote equipment restitution.
+v0.3.2 removes the v0.3.1 `AddActorBlock` experiment. The dual-client test proved that ActorBlock is too broad: it suppresses ordinary IED gear but also suppresses IED Custom Items, leaving only equipment genuinely equipped through Skyrim Together visible.
 
-The previous private-runtime experiments are retired. IEDSyncTogether does not patch `ImmersiveEquipmentDisplays.dll`, does not wrap IED's internal `ProcessSlots`, and does not intercept `SelectSlotItem`.
+The validated LAN synchronization and public Papyrus Custom Item renderer remain unchanged.
 
-Instead, while remote restitution is being developed, enable IED's own global setting:
+No private IED runtime hook is installed. IEDSyncTogether does not patch `ImmersiveEquipmentDisplays.dll`, does not intercept `ProcessSlots`, and does not intercept `SelectSlotItem`.
+
+### What v0.3.2 verifies
+
+IED 1.7.4's own source implements the desired native separation:
 
 ```text
-Disable NPC equipment displays
+if disable_npc_slots is false OR actor holder is Player
+    ProcessSlots
+
+ProcessCustom
 ```
 
-on **every STR client**.
+With `disable_npc_slots=true`, an NPC should therefore skip ordinary inventory-driven IED slots while still processing Custom Items.
 
-IED 1.7.4 already handles this distinction internally: its ordinary equipment-slot pass is skipped for NPCs when that setting is enabled, while the PlayerCharacter continues through normal slot processing and IED Custom Items continue to be processed. This gives IEDSyncTogether the clean test environment it needs:
+IED also marks an `ActorObjectHolder` as the player only when the actor pointer is exactly equal to the local `PlayerCharacter*` pointer.
 
-- the local player keeps normal IED favorites, placement rules and presets;
-- ordinary NPC/STR-proxy slot displays are disabled by IED itself;
-- IEDSyncTogether can render the authoritative remote state using non-inventory Custom Items;
-- no private IED ABI interception is required.
+v0.3.2 adds read-only diagnostics for both assumptions:
 
-This setting is intentionally **not forced or written by IEDSyncTogether**. It belongs to IED and may affect every NPC, so it must be enabled explicitly by the user during this development phase.
+1. it reads `Data\SKSE\Plugins\IED\Settings.json`, the settings file used by IED, and logs the stored `disable_npc_slots` value;
+2. for every resolved STR proxy it logs whether the proxy's actual `Actor*` pointer equals the local `PlayerCharacter*` pointer.
 
-## Node Override presets and spear placement
+IEDSyncTogether never writes the IED settings file.
 
-The supplied `Backpack And Spears Repositionner` archive was inspected as part of the v0.3.0 work. Its current archive contains an IED **Node Overrides** profile, including `CME ...` / `MOV ...` skeleton-node transforms. It is not, by itself, a list of spear keyword-routing rules.
+Expected diagnostic lines include:
 
-For the current development baseline:
+```text
+IED settings diagnostic: path="...\Data\SKSE\Plugins\IED\Settings.json" disable_npc_slots=true source=IED Settings.json (read-only)
+IED proxy classification diagnostic: proxy=FFxxxxxx player=00000014 proxyIsPlayerPointer=0 proxyIsPlayerFormID=0
+```
 
-- install/import the same Node Overrides profile on both clients;
-- keep that IED profile as the source of truth for local node transforms;
-- IEDSyncTogether continues to create remote Custom Items on IED managed equipment nodes;
-- v0.3.0 does **not** hard-code guessed spear keywords, offsets or rotations from that profile.
-
-Exact remote transform replication is the next layer to build. IED 1.7.4's public Papyrus API exposes `SetItemNodeActor`, `SetItemPositionActor`, `SetItemRotationActor` and `SetItemScaleActor`, so once the authoritative local node/transform data is identified we can reproduce it without returning to runtime hooks.
+`proxyIsPlayerPointer=0` is the key classification result because it mirrors IED's own player test.
 
 ## Official IED API renderer
 
@@ -53,11 +56,11 @@ The synchronized objects use native Papyrus functions already shipped by IED 1.7
 - `IED.SetItemEnabledActor` enables the generated entry.
 - `IED.DeleteAllActor` removes stale IEDSyncTogether entries before rebuilding a changed snapshot.
 - `IED.Evaluate` refreshes the proxy.
-- `IED.RemoveActorBlock` clears any historical IEDSyncTogether block state.
+- `IED.RemoveActorBlock` clears historical IEDSyncTogether/v0.3.1 block state before rebuilding.
 
 `abIsInventoryForm=false` is essential: the synchronized model can be displayed even when the STR proxy does not contain the owner's real inventory entry.
 
-IED also exposes public Custom Item setters for position, rotation and scale. These are deliberately not populated with guessed values in v0.3.0.
+IED also exposes public Custom Item setters for position, rotation and scale. Exact transform replication is a later restitution layer and is deliberately not populated with guessed values here.
 
 ## Why an ESP is included
 
@@ -78,13 +81,16 @@ Do not rename or disable this ESP.
 DataLoaded
     -> start IEDSyncTogether
     -> no IED binary patch is installed
-    -> require native IED "Disable NPC equipment displays" development baseline
+    -> read IED Settings.json read-only and log disable_npc_slots
+    -> start read-only proxy classification diagnostics
 
 PostLoadGame / NewGame
     -> wait for LAN peer + matching STR proxy
 
 remote proxy resolved
     -> register proxy for authoritative Custom Item rendering
+    -> remove any stale v0.3.1 ActorBlock owned by IEDSyncTogether
+    -> log proxy Actor* vs PlayerCharacter* classification
 
 remote STATE received
     -> store 19-slot snapshot using stable form identities
@@ -100,7 +106,9 @@ proxy disappears / STR disconnect
     -> delete IEDSyncTogether Custom Items
 ```
 
-The legacy INI key `SuppressRemoteNpcDisplays` remains for compatibility. With the default value `1`, it registers resolved STR proxies for authoritative Custom Item rendering. It does **not** alter IED's global NPC setting itself.
+The legacy INI key `SuppressRemoteNpcDisplays` remains for compatibility. With the default value `1`, it registers resolved STR proxies for authoritative Custom Item rendering. It does not alter IED's global NPC setting itself.
+
+Note: a legacy log line may still say `Suppressed IED NPC display` when this registration occurs. In the current Papyrus-only renderer this historical message means the proxy was registered for authoritative Custom Item rendering; v0.3.2 does not install an ActorBlock or private suppression hook.
 
 ## Building
 
@@ -113,7 +121,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build-vortex.ps1
 The archive name follows `CMakeLists.txt`:
 
 ```text
-dist/IEDSyncTogether-v0.3.0.zip
+dist/IEDSyncTogether-v0.3.2.zip
 ```
 
 Expected relevant contents:
@@ -124,42 +132,50 @@ Data/SKSE/Plugins/IEDSyncTogether.dll
 Data/SKSE/Plugins/IEDSyncTogether.ini
 ```
 
-The archive must **not** contain `ImmersiveEquipmentDisplays.dll`. Keep the official IED 1.7.4 installation enabled separately in Vortex.
+The archive must **not** contain `ImmersiveEquipmentDisplays.dll`. Keep official IED 1.7.4 installed separately in Vortex.
 
-## v0.3.0 test protocol
+## v0.3.2 test protocol
 
-Install the same v0.3.0 archive on both STR clients.
+Install the same v0.3.2 archive on both STR clients.
 
-On **both PCs**, open IED and enable:
+On both PCs, open IED and enable:
 
 ```text
 Disable NPC equipment displays
 ```
 
-Also import/activate the same Node Overrides profile used for weapon placement on both PCs when testing placement-sensitive equipment such as spears.
+Use the same clear equipment pattern as the v0.3.1 test:
 
-Before connecting the second client:
+1. keep one or more weapons/shields favorited but stowed;
+2. keep at least one different item genuinely equipped;
+3. verify the owner still sees the normal local IED favorites;
+4. connect both STR clients;
+5. record which favorited/stowed items are visible on the remote proxy;
+6. record which genuinely equipped items are visible;
+7. send both `IEDSyncTogether.log` files after the test.
 
-1. load the same save that previously crashed with v0.2.5;
-2. verify the local player's IED favorites are visible;
-3. equip/stow the spear and verify the local placement preset still behaves normally.
-
-Then connect the second STR client and verify:
-
-1. the local player's IED display remains unchanged;
-2. the remote proxy no longer shows stock IED equipment from its STR proxy inventory;
-3. only IEDSyncTogether's remote Custom Items remain as the equipment-restoration layer;
-4. note any remote item using the wrong node or transform for the next restitution pass.
-
-The log must contain:
+The important startup lines are:
 
 ```text
-IEDSyncTogether v0.3.0 loading
-IED integration mode: official Papyrus Custom Item API; no IED runtime patch installed
-IED v0.3.0 baseline: enable "Disable NPC equipment displays" ...
+IEDSyncTogether v0.3.2 loading
+IED integration mode: official Papyrus Custom Item API + read-only diagnostics; no ActorBlock probe and no IED runtime patch installed
+IED settings diagnostic: ... disable_npc_slots=true ...
 ```
 
-There must be no runtime-hook installation line.
+For every resolved remote actor there should also be:
+
+```text
+IED proxy classification diagnostic: proxy=FFxxxxxx player=00000014 proxyIsPlayerPointer=0 proxyIsPlayerFormID=0
+```
+
+### Interpretation
+
+- `disable_npc_slots=false`: the IED setting is not persisted in the file IED loads; fix that before investigating anything else.
+- `disable_npc_slots=true` + `proxyIsPlayerPointer=1`: the proxy is being classified as the PlayerCharacter and IED's normal player slot path explains the extra display.
+- `disable_npc_slots=true` + `proxyIsPlayerPointer=0`: the proxy has the expected NPC classification. If inventory-derived gear is still visible, that layer must be isolated separately rather than suppressing all of IED.
+- only equipped STR gear + synchronized favorites visible: the native IED setting is sufficient and no suppression hook is required.
+
+See `docs/v0.3.2-ied-diagnostics.md` for the focused test notes.
 
 ## Historical safety note
 
@@ -167,7 +183,9 @@ There must be no runtime-hook installation line.
 - v0.2.4 attempted a higher-level `ProcessSlots` filter using a misidentified handle and affected local IED behavior.
 - v0.2.5 attempted runtime calibration and still crashed on save load because the inferred internal call boundary was not safe to wrap.
 - v0.2.6 removed those hooks and restored the official Papyrus-only renderer.
-- v0.3.0 keeps that safe renderer and adopts IED's own NPC-display switch as the temporary duplicate-suppression baseline.
+- v0.3.0 adopted IED's native NPC-slot switch as the safe baseline.
+- v0.3.1 tested public `AddActorBlock`; it correctly hid ordinary IED gear but also hid Custom Items, so the probe was rejected.
+- v0.3.2 removes ActorBlock and diagnoses the native `disable_npc_slots` + proxy-classification path directly.
 
 Future synchronization work must stay on public/stable IED interfaces or synchronize explicit data rather than patching private IED runtime internals.
 
