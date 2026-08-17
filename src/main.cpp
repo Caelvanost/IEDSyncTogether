@@ -1,7 +1,6 @@
 #include "PCH.h"
 
 #include "IEDBridge.h"
-#include "IEDRuntimeHook.h"
 #include "IEDSyncTogether/Interface.h"
 #include "SyncService.h"
 
@@ -30,17 +29,16 @@ namespace
 
         switch (message->type) {
         case SKSE::MessagingInterface::kDataLoaded:
-            if (IEDRuntimeHook::Install()) {
-                SKSE::log::info(
-                    "IED integration mode: official Papyrus Custom Item API + runtime-calibrated exact-Actor per-proxy ProcessSlots suppression");
-            } else {
-                SKSE::log::warn(
-                    "IED ProcessSlots suppression unavailable; Custom Item synchronization remains active but normal IED NPC slots may also be visible");
-            }
+            // v0.2.0 intentionally performs no binary patching of IED. All IED
+            // integration goes through the native Papyrus API shipped by the
+            // official Immersive Equipment Displays 1.7.4 DLL.
+            SKSE::log::info("IED integration mode: official Papyrus API; no IED runtime patch installed");
             service.Start();
             break;
 
         case SKSE::MessagingInterface::kPreLoadGame:
+            // IED custom entries are save-persistent. Clear every proxy still
+            // owned by this runtime before the VM swaps to another save.
             IEDBridge::GetSingleton().ResetRemoteRendering();
             service.SetGameLoaded(false);
             service.Reset();

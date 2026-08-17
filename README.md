@@ -6,37 +6,25 @@ Compatibility and synchronization layer between Immersive Equipment Displays (IE
 
 STR represents remote players as dynamically created actor proxies. IEDSyncTogether captures the 19 forms actually displayed by IED on the owning client, exchanges stable `plugin + local FormID` identities over the LAN, binds the remote state to the matching STR proxy, and reproduces that state locally without changing STR inventory or equipment.
 
-## v0.2.5: protect the local player and runtime-calibrate proxy identity
+## v0.2.6: safe rollback after runtime-hook crashes
 
-v0.2.5 fixes the v0.2.4 regression where connecting a remote STR proxy could make the local player's normal IED slots disappear. That regression also caused placement presets to stop applying correctly to locally equipped/favorited weapons because IED's normal `ProcessSlots` path was being skipped for the wrong actor.
+v0.2.6 removes the experimental IED runtime interception used by v0.2.4 and v0.2.5.
 
-The v0.2.4 assumption was incorrect: IED's private `Game::ObjectRefHandle` at the start of `ProcessParamsData` must not be treated as if it were CommonLibSSE-NG's `RE::ObjectRefHandle` native 32-bit representation. In the failing runtime log, the proxy was armed and the next local 19-slot capture immediately returned zero forms for every slot.
+The v0.2.4 handle-based filter incorrectly affected the local player's normal IED slot processing. The v0.2.5 runtime-calibrated wrapper then crashed while loading a save: the crash stack showed `ImmersiveEquipmentDisplays.dll+00E5855 -> IEDSyncTogether.dll -> ImmersiveEquipmentDisplays.dll+00DF591`, proving that the inferred `ProcessSlots` call boundary/calling context was not safe to invoke through our wrapper.
 
-v0.2.5 therefore removes all handle-value matching from the suppression selector.
+v0.2.6 therefore restores the known-safe v0.2.3 integration path:
 
-### Runtime-calibrated Actor* selector
+- no in-memory patch is installed in `ImmersiveEquipmentDisplays.dll`;
+- `src/IEDRuntimeHook.*` is not compiled or called;
+- local IED behavior, favorites, weapon placement and user presets are left entirely to official IED;
+- remote synchronized display still uses IED's public Papyrus Custom Item API;
+- the official IED 1.7.4 DLL is never rebuilt, replaced, modified on disk or redistributed.
 
-The `DoObjectEvaluation -> ProcessSlots` call-site remains the interception level because this preserves IED's own control flow: skipping `ProcessSlots` still allows the subsequent `ProcessCustom` pass to execute.
-
-Actor identification is now fail-open and calibrated at runtime:
-
-1. the wrapper observes normal IED `ProcessSlots` evaluations;
-2. it searches the readable `ProcessParams` stack region for the exact `RE::PlayerCharacter*` address;
-3. the same unique offset must be observed repeatedly before it is accepted as the actor-field offset;
-4. until calibration succeeds, **no `ProcessSlots` call is suppressed**;
-5. after calibration, the wrapper reads only that calibrated pointer field;
-6. the local `PlayerCharacter*` is explicitly excluded from suppression;
-7. only an exact `Actor*` registered by the STR proxy resolver is allowed to skip `ProcessSlots`.
-
-This avoids assuming IED's private handle ABI and prevents Kahel/the local player from being mistaken for a remote proxy.
-
-The official `ImmersiveEquipmentDisplays.dll` 1.7.4 file is never rebuilt, replaced, modified on disk or redistributed. The call-site is still validated against the known official 1.7.4 machine-code fingerprints and x64 unwind metadata before any in-memory patch is installed.
-
-The old v0.2.2 `SelectSlotItem` experiment remains retired. v0.2.5 never changes `SelectSlotItem` and never returns a fabricated/null slot-selection object to IED.
+This intentionally re-accepts the known limitation that IED's ordinary NPC renderer may display the STR proxy's local inventory in addition to IEDSyncTogether's authoritative Custom Items. That duplication is preferable to risking local-player regressions or save-load crashes.
 
 ## Official IED API renderer
 
-Remote synchronized objects use native Papyrus functions already shipped by official IED 1.7.4:
+The synchronized objects use native Papyrus functions already shipped by IED 1.7.4:
 
 - `IED.GetSlottedForm` captures the 19 authoritative display slots on the owning player.
 - `IED.CreateItemActor` creates proxy-only Custom Items with `abIsInventoryForm=false`.
@@ -47,11 +35,11 @@ Remote synchronized objects use native Papyrus functions already shipped by offi
 - `IED.Evaluate` refreshes the proxy.
 - `IED.RemoveActorBlock` clears any historical IEDSyncTogether block state.
 
-`abIsInventoryForm=false` lets IED display the synchronized form even when the STR proxy does not contain the owner's real inventory entry.
+`abIsInventoryForm=false` is essential: the synchronized model can be displayed even when the STR proxy does not contain the owner's real inventory entry.
 
 ## Why an ESP is included
 
-IED's Custom Item Papyrus API requires `asPlugin` to name a loaded Skyrim data plugin. `build-vortex.ps1` generates a minimal ESL-flagged `IEDSyncTogether.esp`. It contains no gameplay records and exists only as IEDSyncTogether's ownership namespace for Custom Item configuration.
+IED's Custom Item Papyrus API requires `asPlugin` to name a loaded Skyrim data plugin. `build-vortex.ps1` therefore generates a minimal ESL-flagged `IEDSyncTogether.esp`. It contains no gameplay records and exists only as IEDSyncTogether's ownership namespace for persistent Custom Item configuration.
 
 Do not rename or disable this ESP.
 
@@ -66,35 +54,30 @@ Do not rename or disable this ESP.
 
 ```text
 DataLoaded
-    -> verify official IED 1.7.4 fingerprint and ProcessSlots call site
-    -> install the narrow ProcessSlots wrapper if validation succeeds
-    -> cache PlayerCharacter address
     -> start IEDSyncTogether
+    -> no IED binary patch is installed
 
-normal IED player evaluations
-    -> locate PlayerCharacter* uniquely inside ProcessParams
-    -> require repeated matching offset
-    -> calibrate actor field
+PostLoadGame / NewGame
+    -> wait for LAN peer + matching STR proxy
 
 remote proxy resolved
-    -> register exact proxy Actor*
     -> register proxy for authoritative Custom Item rendering
-
-IED evaluates an actor
-    -> calibration unavailable? run stock ProcessSlots
-    -> actor == local PlayerCharacter? run stock ProcessSlots
-    -> actor == exact tracked STR proxy? skip ProcessSlots
-    -> otherwise run stock ProcessSlots
-    -> IED continues normally into ProcessCustom
 
 remote STATE received
     -> store 19-slot snapshot using stable form identities
-    -> create/update non-inventory Custom Items
 
-proxy disappears / disconnect
-    -> unregister exact proxy Actor*
+next synchronization tick
+    -> resolve remote forms locally
+    -> if snapshot changed: delete old IEDSyncTogether Custom Items
+    -> create non-inventory Custom Items on the corresponding IED nodes
+    -> evaluate proxy
+
+proxy disappears / STR disconnect
+    -> unregister proxy
     -> delete IEDSyncTogether Custom Items
 ```
+
+The legacy INI key `SuppressRemoteNpcDisplays` remains for compatibility. With the default value `1`, it registers resolved STR proxies for authoritative Custom Item rendering only. v0.2.6 does not suppress IED's ordinary NPC slots at binary level and does not call `IED.AddActorBlock`.
 
 ## Building
 
@@ -107,10 +90,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build-vortex.ps1
 The archive name follows `CMakeLists.txt`:
 
 ```text
-dist/IEDSyncTogether-v0.2.5.zip
+dist/IEDSyncTogether-v0.2.6.zip
 ```
 
-Expected contents include:
+Expected relevant contents:
 
 ```text
 Data/IEDSyncTogether.esp
@@ -118,52 +101,28 @@ Data/SKSE/Plugins/IEDSyncTogether.dll
 Data/SKSE/Plugins/IEDSyncTogether.ini
 ```
 
-The archive must **not** contain `ImmersiveEquipmentDisplays.dll`. Keep official IED 1.7.4 installed separately in Vortex.
+The archive must **not** contain `ImmersiveEquipmentDisplays.dll`. Keep the official IED 1.7.4 installation enabled separately in Vortex.
 
-## First v0.2.5 test
+## First v0.2.6 test
 
-Install the same archive on both STR clients. Startup should include:
-
-```text
-IEDSyncTogether v0.2.5 loading
-IED 1.7.4 proxy ProcessSlots suppression installed: ... actor identity will be runtime-calibrated from PlayerCharacter ...
-```
-
-When a remote proxy is resolved, one of these is expected:
+Install the same v0.2.6 archive on both STR clients. The log must contain:
 
 ```text
-IED ProcessSlots suppression armed: proxy=FF...... actor=0x... actorOffset=0x...
+IEDSyncTogether v0.2.6 loading
+IED integration mode: official Papyrus API; no IED runtime patch installed
 ```
 
-or, if the local-player calibration has not happened yet:
+There must be no `IED 1.7.4 proxy ProcessSlots suppression installed`, `runtime-calibrated`, `ProcessSlots suppression armed`, or `SelectSlotItem` hook line.
 
-```text
-IED ProcessSlots suppression armed: proxy=FF...... actor=0x...; actor-field calibration pending, suppression remains fail-open until calibrated
-```
-
-The critical regression check is the local capture. It must no longer report nineteen zero forms if the local player has IED-displayed favorites/equipment. The local player's favorited equipment and placement presets must remain exactly as they behave with stock IED.
-
-For the current Elir test, `slots=1` remains expected when Elir has no equipped gear and one favorited weapon.
-
-### Emergency fallback
-
-If a test build ever affects the local player's IED display, set:
-
-```ini
-[Compatibility]
-SuppressRemoteNpcDisplays=0
-```
-
-and restart Skyrim. No STR proxy will then be registered in the suppression/custom-render path, restoring ordinary local IED behavior while debugging continues.
+Before connecting the second client, verify that the local player's IED favorites and weapon-placement presets behave normally. Then connect the second client and confirm the local display stays unchanged.
 
 ## Historical note
 
-- v0.2.2: retired `SelectSlotItem` null-return experiment; caused deterministic IED crashes.
-- v0.2.3: safe rollback to official Papyrus Custom Item rendering only.
-- v0.2.4: moved interception to the complete `ProcessSlots` call, but incorrectly assumed private IED handle representation and could suppress the local player.
-- v0.2.5: keeps the safer `ProcessSlots` interception level but replaces handle matching with runtime-calibrated exact `Actor*` matching and an explicit local-player exclusion.
+- v0.2.2 attempted to suppress `SelectSlotItem` by returning `nullptr`; IED immediately dereferenced the result and both clients crashed.
+- v0.2.4 attempted a higher-level `ProcessSlots` filter using a misidentified handle and affected local IED behavior.
+- v0.2.5 attempted runtime calibration and still crashed on save load because the inferred internal call boundary was not safe to wrap.
 
-`integration/ied-dev/` and `build-ied-patched.ps1` remain reference/development material only. Rebuilding IED is not a dependency of this project.
+These runtime-hook approaches are retired. Future duplicate-suppression work must use a public/stable IED or STR-facing integration path rather than another private IED ABI patch.
 
 ## License
 
