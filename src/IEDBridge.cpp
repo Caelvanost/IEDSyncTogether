@@ -99,8 +99,6 @@ namespace IEDSyncTogether
                 return;
             }
 
-            // v0.1.x may have left this actor blocked in IED. Always remove our
-            // historical block before touching Custom Items.
             DispatchNoResult(
                 "RemoveActorBlock",
                 static_cast<RE::Actor*>(actor),
@@ -125,8 +123,6 @@ namespace IEDSyncTogether
             bool dispatched = true;
             std::size_t visible = 0;
 
-            // Custom items persist in the save, so every authoritative update
-            // first clears the entries owned by our own lightweight ESP.
             dispatched &= DispatchNoResult(
                 "RemoveActorBlock",
                 static_cast<RE::Actor*>(actor),
@@ -156,9 +152,6 @@ namespace IEDSyncTogether
                 const auto name = fmt::format("remote-slot-{:02}", slot);
                 const auto node = std::string(kSlotNodes[slot]);
 
-                // Create as a non-inventory form: this is the crucial part for
-                // STR proxies, which do not necessarily own the remote player's
-                // real inventory entry. IED loads the form model directly.
                 dispatched &= DispatchNoResult(
                     "CreateItemActor",
                     static_cast<RE::Actor*>(actor),
@@ -169,8 +162,6 @@ namespace IEDSyncTogether
                     false,
                     node);
 
-                // CreateItemActor initializes one sex variant. Mirror the form to
-                // the other variant so proxy sex changes/recreation are harmless.
                 dispatched &= DispatchNoResult(
                     "SetItemFormActor",
                     static_cast<RE::Actor*>(actor),
@@ -178,6 +169,24 @@ namespace IEDSyncTogether
                     name,
                     true,
                     form);
+
+                // CreateItemActor initializes the requested sex variant only.
+                // Mirror the managed node explicitly as well as the form so a
+                // female STR proxy is rendered on the same IED equipment node.
+                dispatched &= DispatchNoResult(
+                    "SetItemNodeActor",
+                    static_cast<RE::Actor*>(actor),
+                    std::string(kPluginKey),
+                    name,
+                    false,
+                    node);
+                dispatched &= DispatchNoResult(
+                    "SetItemNodeActor",
+                    static_cast<RE::Actor*>(actor),
+                    std::string(kPluginKey),
+                    name,
+                    true,
+                    node);
 
                 if (kLeftWeaponSlots[slot]) {
                     dispatched &= DispatchNoResult(
@@ -426,8 +435,6 @@ namespace IEDSyncTogether
             return false;
         }
 
-        // Apply the latest authoritative remote state from the previous network
-        // tick before starting another local capture.
         RefreshTrackedRemoteProxies();
 
         const bool diagnostic = !g_firstCaptureStarted.exchange(true);
@@ -452,10 +459,6 @@ namespace IEDSyncTogether
 
         const auto formID = actor->GetFormID();
         if (blocked) {
-            // Historical SyncService contract: "blocked" now means that this
-            // resolved STR proxy is owned by our authoritative Custom Item path.
-            // Clear any stale v0.1.x block or Custom Item data first, including
-            // data that may have been serialized under a reused dynamic FormID.
             ClearRemoteCustomItems(actor);
             {
                 std::scoped_lock lock(g_remoteMutex);
