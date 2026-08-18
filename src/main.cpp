@@ -30,7 +30,7 @@ namespace
             SKSE::log::info(
                 "IED integration mode: public Papyrus Custom Items + composed scene-graph Node Override capture; no ActorBlock probe and no IED runtime patch installed");
             SKSE::log::info(
-                "IED v0.4.0 placement sync: composing MOV/CME transforms to a stable skeleton anchor for every displayed slot");
+                "IED v0.4.1 placement sync: MOV/CME transform composition + IED extrinsic Euler rotation serialization");
             service.Start();
             diagnostics.Start();
             break;
