@@ -7,6 +7,10 @@ namespace IEDSyncTogether
 {
     namespace
     {
+        constexpr float kDegreesToRadians = 0.017453292519943295f;
+        constexpr float kRadiansToDegrees = 57.29577951308232f;
+        constexpr float kEulerEpsilon = 1.0e-5f;
+
         int HexValue(char ch)
         {
             if (ch >= '0' && ch <= '9') return ch - '0';
@@ -40,6 +44,44 @@ namespace IEDSyncTogether
             } catch (...) {
                 return std::nullopt;
             }
+        }
+
+        // Scene-graph capture uses CommonLib's ToEulerAnglesXYZ, the inverse of
+        // NiMatrix3::SetEulerAnglesXYZ. IED Custom Item transforms, however,
+        // interpret their XYZ values with the default extrinsic rotation mode.
+        // Reconstruct the exact captured matrix first, then decompose that same
+        // matrix into the extrinsic XYZ convention expected by IED.
+        std::array<float, 3> ToIEDExtrinsicRotation(
+            const std::array<float, 3>& sceneRotation)
+        {
+            RE::NiMatrix3 matrix;
+            matrix.SetEulerAnglesXYZ(
+                sceneRotation[0] * kDegreesToRadians,
+                sceneRotation[1] * kDegreesToRadians,
+                sceneRotation[2] * kDegreesToRadians);
+
+            // IED's extrinsic XYZ convention corresponds to the fixed-axis
+            // composition Rz(-z) * Ry(-y) * Rx(-x) in Skyrim's matrix sign
+            // convention. Extract a numerically stable equivalent triplet.
+            const float y = std::asin(std::clamp(matrix.entry[2][0], -1.0f, 1.0f));
+            const float cy = std::cos(y);
+
+            float x = 0.0f;
+            float z = 0.0f;
+            if (std::abs(cy) > kEulerEpsilon) {
+                x = std::atan2(-matrix.entry[2][1], matrix.entry[2][2]);
+                z = std::atan2(-matrix.entry[1][0], matrix.entry[0][0]);
+            } else {
+                // Gimbal-lock fallback: keep X at zero and fold the remaining
+                // equivalent rotation into Z.
+                z = std::atan2(matrix.entry[0][1], matrix.entry[1][1]);
+            }
+
+            return {
+                x * kRadiansToDegrees,
+                y * kRadiansToDegrees,
+                z * kRadiansToDegrees
+            };
         }
     }
 
@@ -101,12 +143,24 @@ namespace IEDSyncTogether
             encoded += fmt::format("{:X}", slots[i]->localFormID);
 
             if (const auto& placement = slots[i]->placement; placement && !placement->node.empty()) {
+                const auto wireRotation = ToIEDExtrinsicRotation(placement->rotation);
+
+                SKSE::log::trace(
+                    "IED rotation wire conversion: slot={} sceneXYZ=({:.2f},{:.2f},{:.2f}) iedExtrinsicXYZ=({:.2f},{:.2f},{:.2f})",
+                    i,
+                    placement->rotation[0],
+                    placement->rotation[1],
+                    placement->rotation[2],
+                    wireRotation[0],
+                    wireRotation[1],
+                    wireRotation[2]);
+
                 encoded += ":P:";
                 encoded += HexEncode(placement->node);
                 encoded += fmt::format(
                     ":{:.4f}:{:.4f}:{:.4f}:{:.4f}:{:.4f}:{:.4f}:{:.4f}",
                     placement->position[0], placement->position[1], placement->position[2],
-                    placement->rotation[0], placement->rotation[1], placement->rotation[2],
+                    wireRotation[0], wireRotation[1], wireRotation[2],
                     placement->scale);
             }
         }
