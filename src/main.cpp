@@ -1,7 +1,7 @@
 #include "PCH.h"
 
 #include "IEDSyncTogether/Interface.h"
-#include "SyncService.h"
+#include "LocalCaptureProbe.h"
 
 namespace
 {
@@ -26,10 +26,12 @@ namespace
         using namespace IEDSyncTogether;
         switch (message->type) {
         case SKSE::MessagingInterface::kDataLoaded:
-            SyncService::GetSingleton().Start();
+            SKSE::log::info(
+                "STRPM branch mode: local IED capture only; network transport and remote rendering are disabled");
+            LocalCaptureProbe::GetSingleton().Start();
             break;
         case SKSE::MessagingInterface::kPreLoadGame:
-            SyncService::GetSingleton().Reset();
+            LocalCaptureProbe::GetSingleton().Reset();
             break;
         default:
             break;
@@ -41,7 +43,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
     InitializeLogging();
     SKSE::Init(skse);
-    SKSE::log::info("IEDSyncTogether v0.3.1 loading");
+    SKSE::log::info("IEDSyncTogether v{} loading", IEDST_VERSION_STRING);
 
     auto* messaging = SKSE::GetMessagingInterface();
     if (!messaging) {
@@ -58,19 +60,12 @@ extern "C" std::uint32_t IEDST_GetInterfaceVersion() noexcept
 }
 
 extern "C" std::uint32_t IEDST_QuerySlotOverride(
-    std::uint32_t actorFormID,
-    std::uint32_t slotIndex,
+    std::uint32_t,
+    std::uint32_t,
     std::uint32_t* outFormID) noexcept
 {
-    if (!outFormID) {
-        return static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kNotRemote);
+    if (outFormID) {
+        *outFormID = 0;
     }
-
-    RE::FormID resolved = 0;
-    const auto result = IEDSyncTogether::SyncService::GetSingleton().QueryRemoteSlot(
-        actorFormID,
-        slotIndex,
-        resolved);
-    *outFormID = resolved;
-    return result;
+    return static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kNotRemote);
 }
