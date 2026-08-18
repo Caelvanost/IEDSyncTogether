@@ -1,52 +1,78 @@
 # IEDSyncTogether
 
-Compatibility and synchronization layer between
-[Immersive Equipment Displays](https://www.nexusmods.com/skyrimspecialedition/mods/62001)
-and Skyrim Together Reborn.
+Compatibility layer between Immersive Equipment Displays (IED) and Skyrim Together Reborn.
 
-## Problem
+## v0.5.0 — STRPM local-capture branch
 
-Skyrim Together represents remote players as dynamically created `Actor`
-proxies. IED therefore applies its NPC rules to them. In particular, the
-player-only favorite check is not applied, which can make every compatible
-item in the remote inventory appear on the proxy.
+The `strpm` branch is now intentionally focused on **authoritative local capture**. Network transport and remote rendering are disabled in this build while the capture model is validated. The final transport is expected to be provided by STRPluginMessagingAPI (STRPM).
 
-## Intended behavior
+### What is captured
 
-- Detect only Skyrim Together remote-player proxies.
-- Capture the 19 forms actually selected by IED on the owning client.
-- Exchange stable `plugin + local FormID` identities through the STR session.
-- Reproduce that authoritative selection on the matching remote proxy.
-- Never alter the real inventory or equipment managed by Skyrim Together.
+Every ~400 ms, only when the previous capture has completed, IEDSyncTogether snapshots the local `PlayerCharacter`:
 
-## Status
+- the 19 official IED equipment slots through `IED.GetSlottedForm`;
+- every loaded IED scene object whose node follows IED's own `OBJECT ... [FormID]` naming convention;
+- stable `plugin + local FormID` identity;
+- whether the scene object is currently culled/visible;
+- the IED object node name;
+- its attachment node;
+- its parent anchor node;
+- local XYZ position;
+- local scale;
+- the **raw 3x3 rotation matrix**.
 
-The v0.3.1 prototype now builds a Vortex/FOMOD package and provides:
+Rotation is intentionally kept as a matrix at the capture boundary. This avoids losing information or choosing an Euler convention before the future renderer/STRPM adapter actually needs one.
 
-- Skyrim Together remote-proxy detection.
-- Asynchronous capture of all 19 IED equipment slots.
-- STR Plugin Messaging transport on channel `strpm.iedsynctogether.slots.v1`.
-- Default networking with no IEDSyncTogether port forwarding.
-- STRPM diagnostics guard: the default profile requires the `StrBridge` backend.
-- Legacy UDP LAN/direct-peer/relay transport, kept as an opt-in compatibility path.
-- Optional shared-secret HMAC authentication.
-- Stable cross-client form identities (`plugin + local FormID`).
-- A versioned C ABI through which IED can request an authoritative slot.
-- An opt-in fallback that hides IED-cloned gear on remote proxies.
+### Custom Items / Helmet Toggle 2
 
-It is built against:
+IED internally names loaded display objects using forms such as:
 
-- Skyrim Special Edition 1.6.1170
-- SKSE 2.2.6
-- Immersive Equipment Displays 1.7.4
-- Skyrim Together Reborn
-- STRPluginMessagingAPI interface v2 + diagnostics v2
+```text
+OBJECT WEAPON [XXXXXXXX]
+OBJECT ARMOR [XXXXXXXX]
+OBJECT SHIELD [XXXXXXXX/XXXXXXXX]
+OBJECT MISC [XXXXXXXX]
+```
 
-Released IED 1.7.4 has no public per-actor slot-override API. Full visual
-application therefore requires the small companion IED source patch documented
-in [docs/IED-INTEGRATION.md](docs/IED-INTEGRATION.md). Without that integration,
-the DLL remains useful for diagnostics and can optionally suppress the incorrect
-NPC display without touching equipped items or the real STR inventory.
+The probe traverses the local player's scene graph and parses these objects directly. Objects whose FormID is not one of the 19 currently captured equipment-slot forms are reported as `kind=custom`.
+
+That makes the capture path suitable for IED Custom Items used by Helmet Toggle 2: when the helmet Custom Item is loaded, its form identity, visibility state, attachment/anchor and transform are part of the local snapshot. The capture does not depend on knowing Helmet Toggle's preset name or Papyrus key.
+
+This version deliberately captures the **evaluated visual result**, not the preset configuration that produced it.
+
+## Log format
+
+When the local visual state changes, the log contains:
+
+```text
+LOCAL IED STATE CHANGED: slots=... sceneObjects=... customCandidates=...
+LOCAL SLOT: slot=... plugin="..." localForm=...
+LOCAL IED OBJECT: kind=slot|custom slot=... visible=... plugin="..." localForm=... object="..." attachment="..." anchor="..." pos=(...) scale=... rotM=[...]
+```
+
+For Helmet Toggle testing, compare the log before, during and after the remove/equip animation. The helmet should appear as a `kind=custom` object and its `visible`, attachment and/or transform should change with the local Helmet Toggle state.
+
+## Current architecture
+
+```text
+IED / local PlayerCharacter
+        |
+        v
+LocalCaptureProbe
+        |
+        +-- 19 IED equipment slots
+        +-- loaded IED OBJECT nodes
+        +-- Custom Item candidates
+        +-- raw transforms
+        |
+        v
+LocalIEDState
+        |
+        v
+future STRPM adapter
+```
+
+No UDP peer discovery, LAN snapshot exchange or remote Custom Item rendering is started by v0.5.0 on this branch.
 
 ## Build
 
@@ -54,43 +80,25 @@ NPC display without touching equipped items or the real STR inventory.
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build-vortex.ps1
 ```
 
-The generated archive is `IEDSyncTogether-v0.3.1-STRPM-FOMOD.zip`.
+Expected archive:
 
-## Recommended remote setup
-
-1. Install `STRPluginMessagingAPI.dll` with Skyrim Together Reborn.
-2. Install IEDSyncTogether and keep the FOMOD default:
-   `STR plugin messaging / no port forwarding`.
-3. Connect with Skyrim Together normally.
-
-IEDSyncTogether dynamically loads `STRPluginMessagingAPI.dll`, registers the
-`strpm.iedsynctogether.slots.v1` channel, and sends the same compact slot
-payloads through the messaging plugin. It does not bind or expose its own
-Internet UDP port in the default profile.
-
-The default INI also sets `RequireStrBridge=1`. That means IEDSyncTogether
-queries `STR_QueryPluginMessagingDiagnostics` and refuses the STRPM transport
-unless STRPM reports `activeBackend=StrBridge`. This prevents an older or dev
-STRPM UDP backend from silently becoming the "no port forwarding" path.
-
-The old direct UDP transport remains available for diagnostics:
-
-```ini
-[Network]
-Transport=UDP
-RequireStrBridge=0
-RemotePeers=player-one.example:38471,203.0.113.8:38472
-SharedSecret=
+```text
+dist/IEDSyncTogether-v0.5.0.zip
 ```
 
-`Transport=Auto` tries STR Plugin Messaging first, then falls back to UDP when
-STRPluginMessagingAPI is unavailable or rejected by `RequireStrBridge=1`.
-`UdpFallback=1` enables the same fallback while keeping `Transport=STR`; the
-packaged default leaves it disabled.
+## First test protocol
 
-For stricter legacy UDP play, set the same `SharedSecret=` on every client and
-the relay host. `AutoSharedSecretFromSTR=1` can reuse STR's saved password when
-available, matching MorphSyncTogether's previous UDP behavior.
+1. Build and install v0.5.0 on Player1 only; Player2 is not needed for capture validation.
+2. Load Kahel with IED and Helmet Toggle 2 enabled.
+3. Leave the spear/shield favorites in their intended local positions.
+4. Trigger Helmet Toggle remove/equip several times.
+5. Send `IEDSyncTogether.log`.
+
+The important validation is that the log independently records the favorite slot forms and the Helmet Toggle Custom Item visual state.
+
+## Safety
+
+This branch uses the public IED slot getter and Skyrim's evaluated scene graph. It does not detour private IED runtime functions and does not mutate IED's controller/configuration state.
 
 ## License
 
