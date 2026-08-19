@@ -2,131 +2,134 @@
 
 Compatibility layer between Immersive Equipment Displays (IED) and Skyrim Together Reborn.
 
-## v0.6.1 — resilient STRPM state transport
+## v0.7.0 — STRPM ProxyResolver + remote standard-slot renderer
 
-The `strpm` branch has two active responsibilities:
+The `strpm` branch now implements the first complete end-to-end visual path:
 
-1. capture the authoritative evaluated IED state of the local `PlayerCharacter`;
-2. publish/receive that serialized state through STRPluginMessagingAPI (STRPM).
+```text
+local IED evaluated state
+        ↓
+LocalIEDState
+        ↓
+STRPM transport
+        ↓
+remote ConnectionID
+        ↓
+STRPM ProxyResolver
+        ↓
+local STR proxy FormID
+        ↓
+RemoteIEDRenderer
+        ↓
+IED Custom Items owned by IEDSyncTogether
+```
 
-Remote rendering is deliberately still disabled. v0.6.1 hardens state delivery before received state is applied to Skyrim Together proxies.
+### Requirements
 
-### Local state
+- Skyrim Together Reborn 1.8.0
+- Immersive Equipment Displays
+- STRPluginMessagingAPI **v0.8.2 or newer compatible build** with ProxyResolver available
+- the STRPM relay/server files required by that STRPM build
 
-Every ~400 ms, only when the previous capture has completed, IEDSyncTogether captures:
+For v0.7.0 testing, disable IED **NPC Displays** on both clients. This prevents IED's native NPC display system from masking whether the remote equipment is actually being created by IEDSyncTogether.
 
-- the 19 official IED equipment slots through `IED.GetSlottedForm`;
+## Local capture
+
+The authoritative local capture remains the validated v0.5.x/v0.6.x path:
+
+- 19 official IED equipment slots through `IED.GetSlottedForm`;
 - loaded IED `OBJECT ... [FormID]` scene objects;
 - stable `plugin + local FormID` identity;
-- explicit slot/custom classification;
-- visibility state;
+- slot/custom classification;
+- visibility/culling state;
 - object, attachment and anchor node names;
 - local XYZ position and scale;
 - raw 3x3 rotation matrix.
 
-Helmet Toggle 2 Custom Items are captured generically from the evaluated scene graph. No Helmet Toggle-specific preset name, Papyrus key or hard-coded FormID is required.
+Helmet Toggle 2 Custom Items are still captured and transported, but v0.7.0 deliberately does **not** render custom objects remotely yet.
 
-### STRPM transport
+## STRPM transport
 
-Changed `LocalIEDState` snapshots are encoded by `EncodeLocalIEDState()` and sent through the public STRPM v2 API on:
+State is sent on:
 
 ```text
 strpm.iedsynctogether.state.v1
 ```
 
-Messages are sent to `TargetKind::kAllPlayers` with reliable + ordered flags.
+using reliable + ordered STRPM messages.
 
-On receive, v0.6.1:
+The v0.6.1 delivery safeguards remain active:
 
-- ignores local loopback by `ConnectionID`;
-- validates payload size;
-- decodes the payload back into `LocalIEDState`;
-- logs sender identity, sequence, slot count, object count and Custom Item count;
-- does **not** yet render anything on the remote proxy.
+- changed state is retained as pending if transport is unavailable;
+- pending state retries every 1 second;
+- the current full state is retransmitted every 10 seconds as a heartbeat;
+- a late-joining peer can therefore receive the current state without forcing an equipment change.
 
-### v0.6.1 delivery behavior
+## ProxyResolver
 
-The adapter now keeps the latest complete local snapshot independently from immediate transport availability.
+v0.7.0 uses STRPM's public ProxyResolver API only. IEDSyncTogether does not scan `ProcessLists`, compare actor names, or guess dynamic proxy FormIDs.
 
-If a state changes before the Skyrim Together transport is ready:
-
-```text
-capture
-  -> immediate send fails
-  -> latest state remains pending
-  -> retry every 1 second
-  -> connection becomes usable
-  -> latest state is delivered automatically
-```
-
-Only a change in the failure result is logged, so being offline does not generate one warning every second.
-
-After the first successful send, the current complete state is also retransmitted every 10 seconds as a heartbeat. This lets a player who joins the STR session later receive the current IED state without requiring the owner to equip/unequip something artificially.
-
-`kPreLoadGame` clears the pending snapshot so state from a previous save cannot be replayed into a newly loaded game.
-
-The adapter also refreshes the STRPM local `ConnectionID` and display name before sends, allowing identity established after initial game startup to replace early values such as `Prisoner`.
-
-Expected transport logs include:
+A received sender `ConnectionID` is resolved to the local STR proxy FormID. Both ordering cases are supported:
 
 ```text
-STRPM adapter started: channel=strpm.iedsynctogether.state.v1 player="..." connectionID=... retry=1s heartbeat=10s
-STRPM IED STATE TX deferred: reason=change result=transport error bytes=...
-STRPM IED transport resumed; latest pending state delivered
-STRPM IED STATE TX: reason=pending bytes=... objects=... customObjects=...
-STRPM IED STATE TX: reason=change bytes=... objects=... customObjects=...
-STRPM IED STATE TX heartbeat: bytes=... objects=... customObjects=...
-STRPM IED STATE RX: sender=... name="..." sequence=... bytes=... slots=... objects=... customObjects=... (remote rendering disabled)
+state arrives first   -> keep state -> mapping event -> render
+mapping exists first  -> state RX   -> resolve immediately -> render
 ```
 
-### Runtime cleanup
+Proxy mapping callbacks are never used to mutate Skyrim directly. They are forwarded to the SKSE game-task queue before actor lookup or IED rendering.
 
-The `strpm` CMake target does not compile the old IEDSyncTogether networking/runtime stack:
+Mapping lifecycle events also clean up IEDSyncTogether-owned displays when proxies are updated, removed, or cleared.
 
-- `Config`
-- `ProxyResolver`
-- `StrServerDiscovery`
-- legacy `StrTransport`
-- `UdpTransport`
-- `SyncService`
+## Remote renderer in v0.7.0
 
-Those source files remain in repository history for reference, but are not part of the `strpm` runtime. The package does not install the obsolete IEDSyncTogether network INI.
+This first renderer handles only **standard IED slot objects that were actually visible in the owner's evaluated scene graph**.
 
-## Architecture
+For each visible slot object it:
+
+1. resolves the transmitted `plugin + local FormID` on the receiving client;
+2. creates an IED Custom Item on the STR proxy under the private key `IEDSyncTogether.esp`;
+3. attaches it to the corresponding standard IED weapon/shield/ammo node;
+4. applies left-hand semantics for left weapon slots;
+5. enables the item for both male/female IED configurations;
+6. calls `IED.Evaluate`.
+
+The renderer clears only Custom Items owned by `IEDSyncTogether.esp`; it does not delete another mod's IED Custom Items.
+
+Heartbeats are idempotent: an unchanged state is not rebuilt every 10 seconds.
+
+### Deliberately deferred
+
+v0.7.0 does not yet apply the captured placement matrix/offset to the proxy. The initial goal is to validate that the correct standard favorites appear on the correct remote STR actor with NPC Displays disabled.
+
+It also ignores `IEDObjectKind::kCustom` during rendering. Helmet Toggle's belt/hand helmet object remains captured and transported and will be enabled after the standard-slot renderer is validated.
+
+## Expected logs
+
+Startup should include:
 
 ```text
-IED / local PlayerCharacter
-        |
-        v
-LocalCaptureProbe
-        |
-        v
-LocalIEDState
-        |
-        v
-EncodeLocalIEDState()
-        |
-        v
-STRPMAdapter
-   |         |
-   |         +-- pending retry (1 s)
-   +------------ current-state heartbeat (10 s)
-        |
-        v
-STRPluginMessagingAPI / Skyrim Together
-        |
-        v
-STRPMAdapter (remote client)
-        |
-        v
-DecodeLocalIEDState()
-        |
-        v
-Remote LocalIEDState
-        |
-        +-- v0.6.1: log/validate only
-        +-- next: proxy association + remote renderer
+IEDSyncTogether v0.7.0 loading
+STRPM ProxyResolver listener registered
+STRPM adapter started: ... proxyResolverReady=1
+STRPM branch mode: ... standard-slot remote renderer ...
 ```
+
+When the other player is mapped:
+
+```text
+STRPM proxy mapping added: connection=... proxy=FF......
+```
+
+On state reception:
+
+```text
+STRPM IED STATE RX: sender=... name="Kahel" ... renderQueued=1
+REMOTE IED mapping resolved: connection=... name="Kahel" proxy=FF......
+REMOTE IED SLOT queued: ... slot=... plugin="..." localForm=... node="..."
+REMOTE IED RENDER queued: ... visibleSlots=... dispatchAccepted=1 customObjectsIgnored=...
+```
+
+The equivalent sequence should occur for Elir on the other client.
 
 ## Build
 
@@ -137,26 +140,26 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build-vortex.ps1
 Expected archive:
 
 ```text
-dist/IEDSyncTogether-v0.6.1.zip
+dist/IEDSyncTogether-v0.7.0.zip
 ```
 
-## Test protocol
+## v0.7.0 test protocol
 
-Install the same v0.6.1 archive on both players together with the current STRPluginMessagingAPI build.
+Install the same v0.7.0 archive on Player1 and Player2 together with STRPM v0.8.2-compatible files.
 
-1. Launch both Skyrim clients but leave at least one client disconnected from the STR server long enough for its first local IED state to be captured.
-2. Confirm that client logs one `STRPM IED STATE TX deferred`.
-3. Connect both players to the same STR server without changing equipment.
-4. Confirm the previously pending state is automatically sent with `reason=pending` and received by the other player.
-5. Wait at least 10 seconds without changing equipment and confirm a heartbeat is sent/received.
-6. Change a normal IED favorite and trigger Helmet Toggle remove/equip on each player.
+1. Disable IED NPC Displays on both clients before connecting.
+2. Start both games and connect them to the same STR server.
+3. Keep at least one normal IED favorite visible on each local character.
+4. Check whether those standard favorites appear on the other player's STR proxy.
+5. Equip/unequip or change one normal favorite on each player and verify the remote display updates.
+6. Helmet Toggle may be exercised for logging, but its custom helmet object is not expected to render remotely in v0.7.0.
 7. Send both `IEDSyncTogether.log` files from the same session.
 
-With NPC Displays disabled, no remote gear is expected to appear yet: v0.6.1 validates delivery only. The next stage is associating each received state with the STR proxy actor and applying the renderer.
+The decisive v0.7.0 result is: **with NPC Displays disabled, standard IED favorites are created by IEDSyncTogether on the correct proxy actor in both directions.**
 
 ## Safety
 
-The capture path uses the public IED slot getter and Skyrim's evaluated scene graph. It does not detour private IED runtime functions and does not mutate IED controller/configuration state. The v0.6.1 receive path only decodes/logs remote state; it does not modify remote actors yet.
+The capture path uses the public IED slot getter and Skyrim's evaluated scene graph. Proxy identity comes exclusively from the public STRPM ProxyResolver. Remote objects are created through IED's public Papyrus Custom Item API under an IEDSyncTogether-owned key. No private IED runtime detours are used.
 
 ## License
 
