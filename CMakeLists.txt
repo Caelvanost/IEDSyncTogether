@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
     IEDSyncTogether
-    VERSION 0.6.1
+    VERSION 0.7.0
     LANGUAGES CXX
 )
 
@@ -23,6 +23,8 @@ add_commonlibsse_plugin(${PROJECT_NAME}
         src/LocalIEDState.h
         src/LocalCaptureProbe.cpp
         src/LocalCaptureProbe.h
+        src/RemoteIEDRenderer.cpp
+        src/RemoteIEDRenderer.h
         src/STRPMAdapter.cpp
         src/STRPMAdapter.h
         include/IEDSyncTogether/Interface.h
