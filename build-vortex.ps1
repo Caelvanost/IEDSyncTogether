@@ -10,7 +10,6 @@ $BuildRoot = Join-Path $ProjectRoot "build"
 $PackageRoot = Join-Path $BuildRoot "package"
 $PluginRoot = Join-Path $PackageRoot "Data\SKSE\Plugins"
 $DistRoot = Join-Path $ProjectRoot "dist"
-$ConfigSource = Join-Path $ProjectRoot "config\IEDSyncTogether.ini"
 
 if (-not $VcpkgRoot) {
     $VcpkgRoot = "C:\dev\vcpkg"
@@ -58,7 +57,7 @@ function Write-MinimalPlugin {
         }
 
         Write-Subrecord $dataWriter "CNAM" ([System.Text.Encoding]::UTF8.GetBytes("Caelvanost`0"))
-        Write-Subrecord $dataWriter "SNAM" ([System.Text.Encoding]::UTF8.GetBytes("IEDSyncTogether local capture marker`0"))
+        Write-Subrecord $dataWriter "SNAM" ([System.Text.Encoding]::UTF8.GetBytes("IEDSyncTogether STRPM state transport marker`0"))
 
         $file = [System.IO.File]::Open($Path, [System.IO.FileMode]::Create)
         $writer = [System.IO.BinaryWriter]::new($file)
@@ -108,9 +107,6 @@ if (Test-Path -LiteralPath $PackageRoot) {
 New-Item -ItemType Directory -Force -Path $PluginRoot, $DistRoot | Out-Null
 
 Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $PluginRoot "IEDSyncTogether.dll") -Force
-if (Test-Path -LiteralPath $ConfigSource) {
-    Copy-Item -LiteralPath $ConfigSource -Destination (Join-Path $PluginRoot "IEDSyncTogether.ini") -Force
-}
 Write-MinimalPlugin (Join-Path $PackageRoot "Data\IEDSyncTogether.esp")
 
 $Archive = Join-Path $DistRoot "IEDSyncTogether-v$ProjectVersion.zip"
