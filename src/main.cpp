@@ -2,6 +2,7 @@
 
 #include "IEDSyncTogether/Interface.h"
 #include "LocalCaptureProbe.h"
+#include "STRPMAdapter.h"
 
 namespace
 {
@@ -26,10 +27,20 @@ namespace
         using namespace IEDSyncTogether;
         switch (message->type) {
         case SKSE::MessagingInterface::kDataLoaded:
+        {
+            auto& adapter = STRPMAdapter::GetSingleton();
+            const bool transportReady = adapter.Start();
+            auto& capture = LocalCaptureProbe::GetSingleton();
+            capture.SetStateChangedHandler(
+                [](const LocalIEDState& state, std::string_view payload) {
+                    STRPMAdapter::GetSingleton().Publish(state, payload);
+                });
+            capture.Start();
             SKSE::log::info(
-                "STRPM branch mode: local IED capture only; network transport and remote rendering are disabled");
-            LocalCaptureProbe::GetSingleton().Start();
+                "STRPM branch mode: local capture + STRPM state transport; remote rendering disabled; transportReady={}",
+                transportReady ? 1 : 0);
             break;
+        }
         case SKSE::MessagingInterface::kPreLoadGame:
             LocalCaptureProbe::GetSingleton().Reset();
             break;
