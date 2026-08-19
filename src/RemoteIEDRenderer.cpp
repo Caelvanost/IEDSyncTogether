@@ -72,24 +72,40 @@ namespace IEDSyncTogether
                 callback);
         }
 
-        std::string SlotNode(const CapturedIEDObject& object, std::size_t slot)
+        struct SlotNodeSelection
         {
+            std::string node;
+            std::string_view source;
+        };
+
+        SlotNodeSelection SlotNode(const CapturedIEDObject& object, std::size_t slot)
+        {
+            // The evaluated IED scene graph already contains the result of local
+            // placement rules (including keyword-based presets). Prefer that
+            // evaluated MOV/CME anchor instead of reconstructing the generic
+            // equipment node from the slot number.
+            if (!object.anchorNode.empty() &&
+                (object.anchorNode.starts_with("MOV ") ||
+                 object.anchorNode.starts_with("CME "))) {
+                return { object.anchorNode, "captured-anchor" };
+            }
+
             constexpr std::string_view kReferencePrefix = "OBJECT R ";
             constexpr std::string_view kParentPrefix = "OBJECT P ";
 
             if (object.attachmentNode.starts_with(kReferencePrefix)) {
                 const auto suffix = std::string_view(object.attachmentNode).substr(kReferencePrefix.size());
                 if (!suffix.empty()) {
-                    return std::string(suffix);
+                    return { std::string(suffix), "attachment" };
                 }
             }
             if (object.attachmentNode.starts_with(kParentPrefix)) {
                 const auto suffix = std::string_view(object.attachmentNode).substr(kParentPrefix.size());
                 if (!suffix.empty()) {
-                    return std::string(suffix);
+                    return { std::string(suffix), "attachment" };
                 }
             }
-            return std::string(kGearNodes[slot]);
+            return { std::string(kGearNodes[slot]), "slot-fallback" };
         }
 
         void ClearOwnedItems(RE::Actor* actor)
@@ -185,7 +201,8 @@ namespace IEDSyncTogether
             }
 
             const auto itemName = fmt::format("remote-slot-{:02}", slot);
-            const auto node = SlotNode(*object, slot);
+            const auto nodeSelection = SlotNode(*object, slot);
+            const auto& node = nodeSelection.node;
 
             dispatched &= DispatchNoResult(
                 "CreateItemActor",
@@ -235,14 +252,17 @@ namespace IEDSyncTogether
 
             ++rendered;
             SKSE::log::info(
-                "REMOTE IED SLOT queued: connection={} name=\"{}\" proxy={:08X} slot={} plugin=\"{}\" localForm={:X} node=\"{}\"",
+                "REMOTE IED SLOT queued: connection={} name=\"{}\" proxy={:08X} slot={} plugin=\"{}\" localForm={:X} node=\"{}\" nodeSource={} capturedAttachment=\"{}\" capturedAnchor=\"{}\"",
                 connectionID,
                 displayName,
                 proxyFormID,
                 slot,
                 object->form.plugin,
                 object->form.localFormID,
-                node);
+                node,
+                nodeSelection.source,
+                object->attachmentNode,
+                object->anchorNode);
         }
 
         dispatched &= DispatchNoResult(
