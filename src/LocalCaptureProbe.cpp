@@ -170,6 +170,12 @@ namespace IEDSyncTogether
         _captureInFlight.store(false);
     }
 
+    void LocalCaptureProbe::SetStateChangedHandler(StateChangedHandler handler)
+    {
+        std::scoped_lock lock(_stateMutex);
+        _stateChangedHandler = std::move(handler);
+    }
+
     LocalIEDState LocalCaptureProbe::GetLastState() const
     {
         std::scoped_lock lock(_stateMutex);
@@ -244,12 +250,14 @@ namespace IEDSyncTogether
 
         const auto payload = EncodeLocalIEDState(state);
         bool changed = false;
+        StateChangedHandler handler;
         {
             std::scoped_lock lock(_stateMutex);
             changed = payload != _lastPayload;
             if (changed) {
                 _lastState = state;
                 _lastPayload = payload;
+                handler = _stateChangedHandler;
             }
         }
 
@@ -293,6 +301,10 @@ namespace IEDSyncTogether
                     object.rotationMatrix[0], object.rotationMatrix[1], object.rotationMatrix[2],
                     object.rotationMatrix[3], object.rotationMatrix[4], object.rotationMatrix[5],
                     object.rotationMatrix[6], object.rotationMatrix[7], object.rotationMatrix[8]);
+            }
+
+            if (handler) {
+                handler(state, payload);
             }
         }
 
