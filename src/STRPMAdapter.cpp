@@ -8,6 +8,8 @@ namespace IEDSyncTogether
     namespace
     {
         constexpr char kChannel[] = "strpm.iedsynctogether.state.v1";
+        constexpr auto kRetryInterval = std::chrono::seconds(1);
+        constexpr auto kHeartbeatInterval = std::chrono::seconds(10);
     }
 
     STRPMAdapter& STRPMAdapter::GetSingleton()
@@ -102,11 +104,14 @@ namespace IEDSyncTogether
         }
 
         _running.store(true);
+        _retryTimer = std::jthread([this](std::stop_token token) { RetryLoop(token); });
         SKSE::log::info(
-            "STRPM adapter started: channel={} player=\"{}\" connectionID={}",
+            "STRPM adapter started: channel={} player=\"{}\" connectionID={} retry={}s heartbeat={}s",
             kChannel,
             GetLocalPlayerName(),
-            _localConnectionID);
+            _localConnectionID,
+            kRetryInterval.count(),
+            kHeartbeatInterval.count());
         return true;
     }
 
@@ -115,23 +120,76 @@ namespace IEDSyncTogether
         if (!_running.exchange(false)) {
             return;
         }
+
+        if (_retryTimer.joinable()) {
+            _retryTimer.request_stop();
+            _retryTimer.join();
+        }
+
         if (_api && _api->unregisterChannel && _listener.value != 0) {
             (void)_api->unregisterChannel(_listener);
         }
+
+        Reset();
         _listener = {};
         _localConnectionID = 0;
         _api = nullptr;
         SKSE::log::info("STRPM adapter stopped");
     }
 
+    void STRPMAdapter::Reset()
+    {
+        std::scoped_lock lock(_stateMutex);
+        _latestState = {};
+        _latestPayload.clear();
+        _pending = false;
+        _haveSuccessfulSend = false;
+        _lastFailure.reset();
+        _lastSuccessfulSend = {};
+    }
+
     void STRPMAdapter::Publish(const LocalIEDState& state, std::string_view payload)
     {
-        if (!_running.load() || !_api || !_api->send || payload.empty()) {
+        if (payload.empty()) {
             return;
         }
         if (payload.size() > STRPM::kMaxPayloadBytes) {
             SKSE::log::warn("STRPM IED state TX dropped: payload too large ({} bytes)", payload.size());
             return;
+        }
+
+        {
+            std::scoped_lock lock(_stateMutex);
+            _latestState = state;
+            _latestPayload.assign(payload);
+            _pending = true;
+        }
+
+        (void)TrySend(state, payload, "change");
+    }
+
+    bool STRPMAdapter::TrySend(
+        const LocalIEDState& state,
+        std::string_view payload,
+        std::string_view reason)
+    {
+        if (!_running.load() || !_api || !_api->send || payload.empty()) {
+            return false;
+        }
+        if (payload.size() > STRPM::kMaxPayloadBytes) {
+            return false;
+        }
+
+        if (_api->getLocalConnectionID) {
+            STRPM::ConnectionID currentID = 0;
+            if (_api->getLocalConnectionID(&currentID) == STRPM::Result::kOk && currentID != 0) {
+                _localConnectionID = currentID;
+            }
+        }
+
+        if (_api->setLocalDisplayName) {
+            const auto name = GetLocalPlayerName();
+            (void)_api->setLocalDisplayName(name.c_str());
         }
 
         const STRPM::Target target{
@@ -140,27 +198,122 @@ namespace IEDSyncTogether
             nullptr
         };
 
-        std::scoped_lock lock(_sendMutex);
-        const auto result = _api->send(
-            kChannel,
-            target,
-            payload.data(),
-            payload.size(),
-            STRPM::kMessageReliable | STRPM::kMessageOrdered);
+        STRPM::Result result = STRPM::Result::kTransportError;
+        {
+            std::scoped_lock lock(_sendMutex);
+            result = _api->send(
+                kChannel,
+                target,
+                payload.data(),
+                payload.size(),
+                STRPM::kMessageReliable | STRPM::kMessageOrdered);
+        }
 
         if (result != STRPM::Result::kOk) {
-            SKSE::log::warn("STRPM IED state TX failed: {}", STRPM::ResultToString(result));
-            return;
+            bool shouldLog = false;
+            {
+                std::scoped_lock lock(_stateMutex);
+                if (_latestPayload == payload) {
+                    _pending = true;
+                }
+                shouldLog = !_lastFailure || *_lastFailure != result;
+                _lastFailure = result;
+            }
+            if (shouldLog) {
+                SKSE::log::warn(
+                    "STRPM IED STATE TX deferred: reason={} result={} bytes={}",
+                    reason,
+                    STRPM::ResultToString(result),
+                    payload.size());
+            }
+            return false;
+        }
+
+        bool recovered = false;
+        {
+            std::scoped_lock lock(_stateMutex);
+            if (_latestPayload == payload) {
+                _pending = false;
+            }
+            recovered = _lastFailure.has_value();
+            _lastFailure.reset();
+            _haveSuccessfulSend = true;
+            _lastSuccessfulSend = std::chrono::steady_clock::now();
+        }
+
+        if (recovered) {
+            SKSE::log::info("STRPM IED transport resumed; latest pending state delivered");
         }
 
         const auto customCount = std::ranges::count_if(
             state.objects,
             [](const CapturedIEDObject& object) { return object.kind == IEDObjectKind::kCustom; });
-        SKSE::log::info(
-            "STRPM IED STATE TX: bytes={} objects={} customObjects={}",
-            payload.size(),
-            state.objects.size(),
-            customCount);
+
+        if (reason == "heartbeat") {
+            SKSE::log::debug(
+                "STRPM IED STATE TX heartbeat: bytes={} objects={} customObjects={}",
+                payload.size(),
+                state.objects.size(),
+                customCount);
+        } else {
+            SKSE::log::info(
+                "STRPM IED STATE TX: reason={} bytes={} objects={} customObjects={}",
+                reason,
+                payload.size(),
+                state.objects.size(),
+                customCount);
+        }
+        return true;
+    }
+
+    void STRPMAdapter::RetryLoop(std::stop_token token)
+    {
+        while (!token.stop_requested() && _running.load()) {
+            if (auto* tasks = SKSE::GetTaskInterface()) {
+                tasks->AddTask([]() { STRPMAdapter::GetSingleton().RetryTick(); });
+            }
+
+            auto elapsed = std::chrono::milliseconds(0);
+            while (elapsed < kRetryInterval && !token.stop_requested() && _running.load()) {
+                constexpr auto slice = std::chrono::milliseconds(100);
+                std::this_thread::sleep_for(slice);
+                elapsed += slice;
+            }
+        }
+    }
+
+    void STRPMAdapter::RetryTick()
+    {
+        if (!_running.load()) {
+            return;
+        }
+
+        LocalIEDState state;
+        std::string payload;
+        bool pending = false;
+        bool haveSuccessfulSend = false;
+        std::chrono::steady_clock::time_point lastSuccessfulSend{};
+        {
+            std::scoped_lock lock(_stateMutex);
+            if (_latestPayload.empty()) {
+                return;
+            }
+            state = _latestState;
+            payload = _latestPayload;
+            pending = _pending;
+            haveSuccessfulSend = _haveSuccessfulSend;
+            lastSuccessfulSend = _lastSuccessfulSend;
+        }
+
+        if (pending) {
+            (void)TrySend(state, payload, "pending");
+            return;
+        }
+
+        if (haveSuccessfulSend &&
+            std::chrono::steady_clock::now() - lastSuccessfulSend >= kHeartbeatInterval) {
+            (void)TrySend(state, payload, "heartbeat");
+        }
     }
 
     void STRPM_CALL STRPMAdapter::OnMessage(const STRPM::Message* message, void* userData)
