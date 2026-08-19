@@ -2,26 +2,22 @@
 
 Compatibility layer between Immersive Equipment Displays (IED) and Skyrim Together Reborn.
 
-## v0.7.1 — evaluated IED anchor replication
+## v0.7.2 — evaluated IED anchor + transform replication
 
-The `strpm` branch implements the end-to-end standard-slot visual path:
+The `strpm` branch now reproduces the standard-slot visual result already evaluated by IED on the owning client:
 
 ```text
 local IED evaluated state
         ↓
-LocalIEDState
+anchor + position + rotation matrix + scale
         ↓
-STRPM transport
-        ↓
-remote ConnectionID
+LocalIEDState / STRPM
         ↓
 STRPM ProxyResolver
         ↓
-local STR proxy FormID
+remote STR proxy
         ↓
-RemoteIEDRenderer
-        ↓
-IED Custom Items owned by IEDSyncTogether
+IED Custom Item owned by IEDSyncTogether
 ```
 
 ### Requirements
@@ -31,7 +27,7 @@ IED Custom Items owned by IEDSyncTogether
 - STRPluginMessagingAPI v0.8.2 or newer compatible build with ProxyResolver available
 - the relay/server files required by that STRPM build
 
-For renderer testing, disable IED **NPC Displays** on both clients. This ensures remote favorites visible in game are created by IEDSyncTogether rather than IED's normal NPC display path.
+For renderer testing, disable IED **NPC Displays** on both clients so remote favorites visible in game are created by IEDSyncTogether rather than IED's normal NPC display path.
 
 ## Local capture
 
@@ -43,10 +39,13 @@ The authoritative local capture records:
 - slot/custom classification;
 - visibility/culling state;
 - object, attachment and evaluated anchor node names;
-- local XYZ position and scale;
-- raw 3x3 rotation matrix.
+- evaluated local XYZ position;
+- raw 3x3 rotation matrix;
+- scale.
 
-Helmet Toggle 2 Custom Items are captured and transported, but v0.7.1 still does not render arbitrary `IEDObjectKind::kCustom` objects remotely.
+The raw matrix remains the wire representation. IEDSyncTogether does not serialize Euler angles, avoiding an unnecessary convention change during transport.
+
+Helmet Toggle 2 Custom Items are still captured and transported, but v0.7.2 continues to render only standard IED slot objects remotely.
 
 ## STRPM transport and ProxyResolver
 
@@ -69,70 +68,61 @@ IEDSyncTogether uses STRPM's public ProxyResolver API only. It does not scan `Pr
 
 ## Remote renderer
 
-The renderer handles standard IED slot objects that were actually visible in the owner's evaluated scene graph.
-
-For each visible slot object it:
+For every visible standard IED slot object, v0.7.2:
 
 1. resolves the transmitted `plugin + local FormID` on the receiving client;
-2. creates an IED Custom Item on the STR proxy under the private key `IEDSyncTogether.esp`;
-3. selects the remote attachment node from the **evaluated anchor captured on the owner** when available;
-4. falls back to the captured `OBJECT R/P ...` attachment name, then to the generic slot node only if no evaluated anchor is available;
-5. applies left-hand semantics for left weapon slots;
-6. enables the item for both male/female IED configurations;
-7. calls `IED.Evaluate`.
+2. creates an IED Custom Item on the correct STR proxy under `IEDSyncTogether.esp`;
+3. prefers the evaluated `MOV ...` / `CME ...` anchor captured on the owner;
+4. falls back to the captured attachment or generic slot node only if needed;
+5. reconstructs the captured raw 3x3 rotation matrix as `RE::NiMatrix3`;
+6. converts that matrix to XYZ Euler angles only at the IED Papyrus boundary;
+7. applies `SetItemPositionActor`, `SetItemRotationActor`, and `SetItemScaleActor` for both male and female configurations;
+8. applies left-hand semantics where applicable;
+9. enables the item and calls `IED.Evaluate`.
 
-The renderer clears only Custom Items owned by `IEDSyncTogether.esp`; it does not delete another mod's IED Custom Items. Heartbeats are idempotent: an unchanged state is not rebuilt every 10 seconds.
+The renderer clears only Custom Items owned by `IEDSyncTogether.esp`. Heartbeats remain idempotent: unchanged remote state is not rebuilt every 10 seconds.
 
-## v0.7.1 placement fix
+## Why v0.7.2 exists
 
-v0.7.0 proved that standard favorites can be rendered on the correct STR proxy, but it attached each item to the generic slot node. That discarded the result of IED placement rules such as keyword-based presets.
-
-Example from Kahel's evaluated local scene graph:
-
-```text
-slot=0
-attachment="OBJECT R WeaponSword"
-anchor="MOV WeaponSwordOnBack"
-```
-
-v0.7.0 recreated that item on:
-
-```text
-WeaponSword
-```
-
-which put the spear at the hip on the remote client.
-
-v0.7.1 instead prefers:
+v0.7.1 validated the evaluated anchor selection. For example Kahel's spear correctly arrived at Player2 on:
 
 ```text
 MOV WeaponSwordOnBack
 ```
 
-so keyword/profile decisions already evaluated by IED on the owning client are carried across directly. The same mechanism applies generically to anchors such as `MOV WeaponBowDefault`, `MOV ShieldBackDefault`, and other `MOV`/`CME` nodes.
+instead of the generic hip node `WeaponSword`.
 
-This version still does not apply the captured raw position/rotation matrix explicitly. The current test isolates whether selecting the evaluated anchor is sufficient to reproduce the owner's preset placement. Exact local transform replication remains the next step if required.
+However the weapon orientation was still wrong because only the anchor was replicated. Kahel's local evaluated spear state also contains:
+
+```text
+pos=(-11.891,1.917,6.666)
+rotM=[0.069,-0.211,0.975;-0.808,-0.586,-0.070;0.586,-0.783,-0.210]
+scale=1.000
+```
+
+v0.7.2 applies those values to the remote IED Custom Item. This is intended to carry the final result of IED placement rules, including keyword-based weapon placement and additional offsets used to coexist with backpacks, without reimplementing those conditions inside IEDSyncTogether.
 
 ## Expected logs
 
 Startup should include:
 
 ```text
-IEDSyncTogether v0.7.1 loading
+IEDSyncTogether v0.7.2 loading
 STRPM ProxyResolver listener registered
 STRPM adapter started: ... proxyResolverReady=1
 ```
 
-For Kahel's spear on Player2, the important renderer line should now contain:
+For a rendered slot, the log now includes the exact transform sent to IED:
 
 ```text
-REMOTE IED SLOT queued: ... slot=0 ... node="MOV WeaponSwordOnBack" nodeSource=captured-anchor ... capturedAnchor="MOV WeaponSwordOnBack"
-```
-
-rather than:
-
-```text
-node="WeaponSword"
+REMOTE IED SLOT queued: ...
+node="MOV WeaponSwordOnBack"
+nodeSource=captured-anchor
+pos=(-11.891,1.917,6.666)
+rotDeg=(...,...,...)
+scale=1.000
+capturedAttachment="OBJECT R WeaponSword"
+capturedAnchor="MOV WeaponSwordOnBack"
 ```
 
 ## Build
@@ -144,26 +134,26 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build-vortex.ps1
 Expected archive:
 
 ```text
-dist/IEDSyncTogether-v0.7.1.zip
+dist/IEDSyncTogether-v0.7.2.zip
 ```
 
-## v0.7.1 test protocol
+## v0.7.2 test protocol
 
-Install the same v0.7.1 archive on Player1 and Player2 together with the current STRPM/ProxyResolver build.
+Install the same v0.7.2 archive on Player1 and Player2 together with the current STRPM/ProxyResolver build.
 
 1. Keep IED NPC Displays disabled on both clients.
 2. Connect both players to the same STR server.
-3. Leave Kahel's spear favorite visible with the local IED keyword preset placing it on the back.
-4. Verify that Player2 now sees the spear on the back rather than at the hip.
-5. Check the log for `node="MOV WeaponSwordOnBack" nodeSource=captured-anchor`.
-6. Verify the bow, shield, and Elir's visible favorites still render.
-7. Send both `IEDSyncTogether.log` files if any item remains incorrectly positioned.
+3. Leave Kahel's spear, bow and shield visible with the normal local IED presets active.
+4. Compare their remote position and orientation against Kahel's local display.
+5. Pay particular attention to the spear/backpack combination: the spear should use `MOV WeaponSwordOnBack` and should now reproduce the captured position/rotation rather than merely attaching to the correct node.
+6. Verify Elir's visible favorite in the opposite direction.
+7. Send both `IEDSyncTogether.log` files and describe any remaining visual difference.
 
-Helmet Toggle Custom Items are still captured/transported but remain intentionally excluded from remote rendering in v0.7.1.
+Helmet Toggle Custom Items remain intentionally excluded from remote rendering in v0.7.2; they are still captured and transported for the next stage.
 
 ## Safety
 
-The capture path uses the public IED slot getter and Skyrim's evaluated scene graph. Proxy identity comes exclusively from the public STRPM ProxyResolver. Remote objects are created through IED's public Papyrus Custom Item API under an IEDSyncTogether-owned key. No private IED runtime detours are used.
+The capture path uses the public IED slot getter and Skyrim's evaluated scene graph. Proxy identity comes exclusively from the public STRPM ProxyResolver. Remote objects are created and transformed through IED's public Papyrus Custom Item API under an IEDSyncTogether-owned key. No private IED runtime detours are used.
 
 ## License
 
