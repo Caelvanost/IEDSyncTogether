@@ -14,6 +14,7 @@ namespace IEDSyncTogether
     {
         constexpr std::string_view kPapyrusClass = "IED";
         constexpr std::string_view kPluginKey = "IEDSyncTogether.esp";
+        constexpr float kRadiansToDegrees = 57.29577951308232f;
 
         constexpr std::array<std::string_view, 19> kGearNodes{
             "WeaponSword",
@@ -72,21 +73,16 @@ namespace IEDSyncTogether
                 callback);
         }
 
-        struct SlotNodeSelection
+        struct NodeSelection
         {
             std::string node;
             std::string_view source;
         };
 
-        SlotNodeSelection SlotNode(const CapturedIEDObject& object, std::size_t slot)
+        NodeSelection SlotNode(const CapturedIEDObject& object, std::size_t slot)
         {
-            // The evaluated IED scene graph already contains the result of local
-            // placement rules (including keyword-based presets). Prefer that
-            // evaluated MOV/CME anchor instead of reconstructing the generic
-            // equipment node from the slot number.
             if (!object.anchorNode.empty() &&
-                (object.anchorNode.starts_with("MOV ") ||
-                 object.anchorNode.starts_with("CME "))) {
+                (object.anchorNode.starts_with("MOV ") || object.anchorNode.starts_with("CME "))) {
                 return { object.anchorNode, "captured-anchor" };
             }
 
@@ -96,16 +92,78 @@ namespace IEDSyncTogether
             if (object.attachmentNode.starts_with(kReferencePrefix)) {
                 const auto suffix = std::string_view(object.attachmentNode).substr(kReferencePrefix.size());
                 if (!suffix.empty()) {
-                    return { std::string(suffix), "attachment" };
+                    return { std::string(suffix), "captured-attachment" };
                 }
             }
             if (object.attachmentNode.starts_with(kParentPrefix)) {
                 const auto suffix = std::string_view(object.attachmentNode).substr(kParentPrefix.size());
                 if (!suffix.empty()) {
-                    return { std::string(suffix), "attachment" };
+                    return { std::string(suffix), "captured-attachment" };
                 }
             }
             return { std::string(kGearNodes[slot]), "slot-fallback" };
+        }
+
+        std::array<float, 3> RotationDegrees(const CapturedIEDObject& object)
+        {
+            RE::NiMatrix3 matrix{};
+            std::size_t index = 0;
+            for (std::size_t row = 0; row < 3; ++row) {
+                for (std::size_t col = 0; col < 3; ++col) {
+                    matrix.entry[row][col] = object.rotationMatrix[index++];
+                }
+            }
+
+            RE::NiPoint3 euler{};
+            matrix.ToEulerAnglesXYZ(euler);
+            return {
+                euler.x * kRadiansToDegrees,
+                euler.y * kRadiansToDegrees,
+                euler.z * kRadiansToDegrees
+            };
+        }
+
+        bool ApplyCapturedTransform(
+            RE::Actor* actor,
+            const std::string& itemName,
+            bool female,
+            const CapturedIEDObject& object,
+            const std::array<float, 3>& rotationDegrees)
+        {
+            std::vector<float> position{
+                object.position[0],
+                object.position[1],
+                object.position[2]
+            };
+            std::vector<float> rotation{
+                rotationDegrees[0],
+                rotationDegrees[1],
+                rotationDegrees[2]
+            };
+
+            bool dispatched = true;
+            dispatched &= DispatchNoResult(
+                "SetItemPositionActor",
+                static_cast<RE::Actor*>(actor),
+                std::string(kPluginKey),
+                itemName,
+                female,
+                position);
+            dispatched &= DispatchNoResult(
+                "SetItemRotationActor",
+                static_cast<RE::Actor*>(actor),
+                std::string(kPluginKey),
+                itemName,
+                female,
+                rotation);
+            dispatched &= DispatchNoResult(
+                "SetItemScaleActor",
+                static_cast<RE::Actor*>(actor),
+                std::string(kPluginKey),
+                itemName,
+                female,
+                std::clamp(object.scale, 0.01f, 100.0f));
+            return dispatched;
         }
 
         void ClearOwnedItems(RE::Actor* actor)
@@ -202,7 +260,7 @@ namespace IEDSyncTogether
 
             const auto itemName = fmt::format("remote-slot-{:02}", slot);
             const auto nodeSelection = SlotNode(*object, slot);
-            const auto& node = nodeSelection.node;
+            const auto rotationDegrees = RotationDegrees(*object);
 
             dispatched &= DispatchNoResult(
                 "CreateItemActor",
@@ -212,7 +270,7 @@ namespace IEDSyncTogether
                 false,
                 remoteForm,
                 false,
-                node);
+                nodeSelection.node);
 
             dispatched &= DispatchNoResult(
                 "SetItemFormActor",
@@ -229,7 +287,14 @@ namespace IEDSyncTogether
                     std::string(kPluginKey),
                     itemName,
                     female,
-                    node);
+                    nodeSelection.node);
+
+                dispatched &= ApplyCapturedTransform(
+                    actor,
+                    itemName,
+                    female,
+                    *object,
+                    rotationDegrees);
 
                 if (kLeftWeaponSlots[slot]) {
                     dispatched &= DispatchNoResult(
@@ -252,15 +317,18 @@ namespace IEDSyncTogether
 
             ++rendered;
             SKSE::log::info(
-                "REMOTE IED SLOT queued: connection={} name=\"{}\" proxy={:08X} slot={} plugin=\"{}\" localForm={:X} node=\"{}\" nodeSource={} capturedAttachment=\"{}\" capturedAnchor=\"{}\"",
+                "REMOTE IED SLOT queued: connection={} name=\"{}\" proxy={:08X} slot={} plugin=\"{}\" localForm={:X} node=\"{}\" nodeSource={} pos=({:.3f},{:.3f},{:.3f}) rotDeg=({:.3f},{:.3f},{:.3f}) scale={:.3f} capturedAttachment=\"{}\" capturedAnchor=\"{}\"",
                 connectionID,
                 displayName,
                 proxyFormID,
                 slot,
                 object->form.plugin,
                 object->form.localFormID,
-                node,
+                nodeSelection.node,
                 nodeSelection.source,
+                object->position[0], object->position[1], object->position[2],
+                rotationDegrees[0], rotationDegrees[1], rotationDegrees[2],
+                object->scale,
                 object->attachmentNode,
                 object->anchorNode);
         }
