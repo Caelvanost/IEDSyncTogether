@@ -2,58 +2,68 @@
 
 Compatibility layer between Immersive Equipment Displays (IED) and Skyrim Together Reborn.
 
-## v0.5.1 — STRPM local-capture branch
+## v0.6.0 — STRPM state transport
 
-The `strpm` branch is intentionally focused on **authoritative local capture**. Network transport and remote rendering remain disabled while the capture model is validated. The final transport is expected to be provided by STRPluginMessagingAPI (STRPM).
+The `strpm` branch now has two active responsibilities:
 
-### What is captured
+1. capture the authoritative evaluated IED state of the local `PlayerCharacter`;
+2. publish/receive that serialized state through STRPluginMessagingAPI (STRPM).
 
-Every ~400 ms, only when the previous capture has completed, IEDSyncTogether snapshots the local `PlayerCharacter`:
+Remote rendering is deliberately still disabled. v0.6.0 validates transport independently before the received state is applied to Skyrim Together proxies.
+
+### Local state
+
+Every ~400 ms, only when the previous capture has completed, IEDSyncTogether captures:
 
 - the 19 official IED equipment slots through `IED.GetSlottedForm`;
-- every loaded IED scene object whose node follows IED's `OBJECT ... [FormID]` naming convention;
+- loaded IED `OBJECT ... [FormID]` scene objects;
 - stable `plugin + local FormID` identity;
-- slot/custom object classification;
-- visibility/culling state;
+- explicit slot/custom classification;
+- visibility state;
 - object, attachment and anchor node names;
 - local XYZ position and scale;
-- the raw 3x3 rotation matrix.
+- raw 3x3 rotation matrix.
 
-Rotation remains a matrix at the capture boundary so no Euler convention is imposed before rendering.
+Helmet Toggle 2 Custom Items are captured generically from the evaluated scene graph. No Helmet Toggle-specific preset name, Papyrus key or hard-coded FormID is required.
 
-### v0.5.1 changes
+### STRPM transport
 
-- Adds a dedicated `LocalIEDState` model independent of the capture probe.
-- Adds deterministic `EncodeLocalIEDState` / `DecodeLocalIEDState` serialization for the future STRPM adapter.
-- Deduplicates repeated scene-graph visits by `NiAVObject*` identity.
-- Performs a second logical deduplication pass for equivalent IED objects.
-- Stores the last complete local state and serialized payload for later publication through STRPM.
-- Keeps Helmet Toggle 2 Custom Items generic: no Helmet Toggle-specific preset name, Papyrus key or hard-coded FormID is required.
-
-### Custom Items / Helmet Toggle 2
-
-Loaded display objects are discovered through IED node names such as:
+Changed `LocalIEDState` snapshots are encoded by `EncodeLocalIEDState()` and sent through the public STRPM v2 API on:
 
 ```text
-OBJECT WEAPON [XXXXXXXX]
-OBJECT ARMOR [XXXXXXXX]
-OBJECT SHIELD [XXXXXXXX/XXXXXXXX]
-OBJECT MISC [XXXXXXXX]
+strpm.iedsynctogether.state.v1
 ```
 
-Objects whose FormID is not one of the 19 currently captured equipment-slot forms are represented as `IEDObjectKind::kCustom`. This captures the evaluated Helmet Toggle visual result, including transitions between pelvis/waist attachment, `AnimObjectR`, and absence from the scene graph.
+Messages are sent to `TargetKind::kAllPlayers` with reliable + ordered flags.
 
-## Log format
+On receive, v0.6.0:
 
-When the serialized local visual state changes:
+- ignores local loopback by `ConnectionID`;
+- validates payload size;
+- decodes the payload back into `LocalIEDState`;
+- logs sender identity, sequence, slot count, object count and Custom Item count;
+- does **not** yet render anything on the remote proxy.
+
+Expected transport logs:
 
 ```text
-LOCAL IED STATE CHANGED: slots=... sceneObjects=... customObjects=... payloadBytes=...
-LOCAL SLOT: slot=... plugin="..." localForm=...
-LOCAL IED OBJECT: kind=slot|custom slot=... visible=... plugin="..." localForm=... object="..." attachment="..." anchor="..." pos=(...) scale=... rotM=[...]
+STRPM adapter started: channel=strpm.iedsynctogether.state.v1 player="..." connectionID=...
+STRPM IED STATE TX: bytes=... objects=... customObjects=...
+STRPM IED STATE RX: sender=... name="..." sequence=... bytes=... slots=... objects=... customObjects=... (remote rendering disabled)
 ```
 
-For a single Helmet Toggle Custom Item, `customObjects` should now normally be `1`, not `2`.
+### Runtime cleanup
+
+The v0.6.0 CMake target no longer compiles the old IEDSyncTogether networking/runtime stack:
+
+- `Config`
+- `ProxyResolver`
+- `StrServerDiscovery`
+- legacy `StrTransport`
+- `UdpTransport`
+- `SyncService`
+
+Those source files remain in repository history for reference, but are not part of the `strpm` runtime. The package also no longer installs the obsolete IEDSyncTogether network INI.
 
 ## Architecture
 
@@ -65,18 +75,28 @@ LocalCaptureProbe
         |
         v
 LocalIEDState
-  |          |
-  |          +-- objects: slots + Custom Items + raw transforms
-  +-- slots: 19 GetSlottedForm results
         |
         v
 EncodeLocalIEDState()
         |
         v
-future STRPM adapter
+STRPMAdapter
+        |
+        v
+STRPluginMessagingAPI / Skyrim Together
+        |
+        v
+STRPMAdapter (remote client)
+        |
+        v
+DecodeLocalIEDState()
+        |
+        v
+Remote LocalIEDState
+        |
+        +-- v0.6.0: log/validate only
+        +-- next: remote renderer
 ```
-
-No UDP peer discovery, LAN snapshot exchange or remote rendering is started by v0.5.1 on this branch.
 
 ## Build
 
@@ -87,22 +107,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build-vortex.ps1
 Expected archive:
 
 ```text
-dist/IEDSyncTogether-v0.5.1.zip
+dist/IEDSyncTogether-v0.6.0.zip
 ```
 
 ## Test protocol
 
-1. Build and install v0.5.1 on Player1 only.
-2. Load Kahel with IED and Helmet Toggle 2 enabled.
-3. Leave normal IED favorites visible.
-4. Remove and equip the helmet several times with Helmet Toggle.
-5. Send `IEDSyncTogether.log`.
+For transport validation, install the same v0.6.0 archive on both players together with the current STRPluginMessagingAPI build.
 
-Validate that normal slot objects are unique and that each Helmet Toggle visual state produces one logical Custom Item entry when present.
+1. Launch both clients and connect through Skyrim Together.
+2. Confirm both logs contain `STRPM adapter started`.
+3. Change an IED favorite on Player1.
+4. Trigger Helmet Toggle remove/equip on Player1.
+5. Repeat one state change on Player2.
+6. Send both `IEDSyncTogether.log` files.
+
+The important validation is that every local `LOCAL IED STATE CHANGED` produces a matching `STRPM IED STATE TX` and a corresponding `STRPM IED STATE RX` on the other client with matching payload size/object counts.
 
 ## Safety
 
-This branch uses the public IED slot getter and Skyrim's evaluated scene graph. It does not detour private IED runtime functions and does not mutate IED controller/configuration state.
+The capture path uses the public IED slot getter and Skyrim's evaluated scene graph. It does not detour private IED runtime functions and does not mutate IED controller/configuration state. The v0.6.0 receive path only decodes/logs remote state; it does not modify remote actors yet.
 
 ## License
 
