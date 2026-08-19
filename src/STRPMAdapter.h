@@ -28,7 +28,7 @@ namespace IEDSyncTogether
         std::atomic_bool _running{ false };
         const STRPM::Interface* _api{ nullptr };
         STRPM::ListenerHandle _listener{};
-        STRPM::ConnectionID _localConnectionID{ 0 };
+        std::atomic<STRPM::ConnectionID> _localConnectionID{ 0 };
         std::mutex _sendMutex;
 
         mutable std::mutex _stateMutex;
