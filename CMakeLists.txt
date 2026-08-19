@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
     IEDSyncTogether
-    VERSION 0.5.1
+    VERSION 0.6.0
     LANGUAGES CXX
 )
 
@@ -15,8 +15,6 @@ add_commonlibsse_plugin(${PROJECT_NAME}
     SOURCES
         src/PCH.h
         src/main.cpp
-        src/Config.cpp
-        src/Config.h
         src/FormIdentity.cpp
         src/FormIdentity.h
         src/IEDBridge.cpp
@@ -25,16 +23,8 @@ add_commonlibsse_plugin(${PROJECT_NAME}
         src/LocalIEDState.h
         src/LocalCaptureProbe.cpp
         src/LocalCaptureProbe.h
-        src/ProxyResolver.cpp
-        src/ProxyResolver.h
-        src/StrServerDiscovery.cpp
-        src/StrServerDiscovery.h
-        src/StrTransport.cpp
-        src/StrTransport.h
-        src/UdpTransport.cpp
-        src/UdpTransport.h
-        src/SyncService.cpp
-        src/SyncService.h
+        src/STRPMAdapter.cpp
+        src/STRPMAdapter.h
         include/IEDSyncTogether/Interface.h
         include/STRPluginMessagingAPI/STRPluginMessagingAPI.h
 )
@@ -52,5 +42,3 @@ target_compile_definitions(${PROJECT_NAME}
         IEDST_BUILD
         IEDST_VERSION_STRING="${PROJECT_VERSION}"
 )
-
-target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32 bcrypt)
