@@ -4,6 +4,7 @@
 #include "IEDBridge.h"
 
 #include <cmath>
+#include <unordered_set>
 
 namespace IEDSyncTogether
 {
@@ -63,6 +64,7 @@ namespace IEDSyncTogether
                 }
             }
             result.slot = slot;
+            result.kind = slot ? IEDObjectKind::kSlot : IEDObjectKind::kCustom;
             result.visible = object && !object->GetAppCulled();
             result.objectNode = object && object->name.c_str() ? object->name.c_str() : "";
 
@@ -91,9 +93,10 @@ namespace IEDSyncTogether
         void VisitIEDObjects(
             RE::NiAVObject* object,
             const std::array<RE::FormID, 19>& slottedForms,
-            std::vector<CapturedIEDObject>& out)
+            std::vector<CapturedIEDObject>& out,
+            std::unordered_set<const RE::NiAVObject*>& visited)
         {
-            if (!object) {
+            if (!object || !visited.insert(object).second) {
                 return;
             }
 
@@ -110,34 +113,24 @@ namespace IEDSyncTogether
             if (auto* node = object->AsNode()) {
                 for (const auto& child : node->GetChildren()) {
                     if (child) {
-                        VisitIEDObjects(child.get(), slottedForms, out);
+                        VisitIEDObjects(child.get(), slottedForms, out, visited);
                     }
                 }
             }
         }
 
-        std::string MakeSignature(const LocalIEDState& state)
+        bool SameLogicalObject(const CapturedIEDObject& lhs, const CapturedIEDObject& rhs)
         {
-            std::string result;
-            for (std::size_t slot = 0; slot < state.slots.size(); ++slot) {
-                if (state.slots[slot]) {
-                    result += fmt::format("S{}:{}:{:X};", slot, state.slots[slot]->plugin, state.slots[slot]->localFormID);
-                }
-            }
-            for (const auto& object : state.objects) {
-                result += fmt::format(
-                    "O:{}:{:X}:{}:{}:{}:{:.3f}:{:.3f}:{:.3f}:{:.3f};",
-                    object.form.plugin,
-                    object.form.localFormID,
-                    object.slot ? static_cast<int>(*object.slot) : -1,
-                    object.visible ? 1 : 0,
-                    object.anchorNode,
-                    object.position[0], object.position[1], object.position[2], object.scale);
-                for (const auto value : object.rotationMatrix) {
-                    result += fmt::format("{:.3f},", value);
-                }
-            }
-            return result;
+            return lhs.kind == rhs.kind &&
+                   lhs.form == rhs.form &&
+                   lhs.slot == rhs.slot &&
+                   lhs.visible == rhs.visible &&
+                   lhs.objectNode == rhs.objectNode &&
+                   lhs.attachmentNode == rhs.attachmentNode &&
+                   lhs.anchorNode == rhs.anchorNode &&
+                   lhs.position == rhs.position &&
+                   lhs.rotationMatrix == rhs.rotationMatrix &&
+                   lhs.scale == rhs.scale;
         }
     }
 
@@ -154,7 +147,7 @@ namespace IEDSyncTogether
         }
         _timer = std::jthread([this](std::stop_token token) { TimerLoop(token); });
         SKSE::log::info(
-            "Local IED capture probe started: equipment slots + loaded IED OBJECT nodes (custom-item capable)");
+            "Local IED capture started: serializable LocalIEDState + deduplicated slot/custom objects");
     }
 
     void LocalCaptureProbe::Stop()
@@ -171,8 +164,22 @@ namespace IEDSyncTogether
 
     void LocalCaptureProbe::Reset()
     {
-        _lastSignature.clear();
+        std::scoped_lock lock(_stateMutex);
+        _lastState = {};
+        _lastPayload.clear();
         _captureInFlight.store(false);
+    }
+
+    LocalIEDState LocalCaptureProbe::GetLastState() const
+    {
+        std::scoped_lock lock(_stateMutex);
+        return _lastState;
+    }
+
+    std::string LocalCaptureProbe::GetLastPayload() const
+    {
+        std::scoped_lock lock(_stateMutex);
+        return _lastPayload;
     }
 
     void LocalCaptureProbe::TimerLoop(std::stop_token token)
@@ -219,33 +226,48 @@ namespace IEDSyncTogether
 
         if (auto* player = RE::PlayerCharacter::GetSingleton()) {
             if (auto* root = player->Get3D1(false)) {
-                VisitIEDObjects(root, slottedForms, state.objects);
+                std::unordered_set<const RE::NiAVObject*> visited;
+                VisitIEDObjects(root, slottedForms, state.objects, visited);
             }
         }
 
         std::ranges::sort(state.objects, [](const auto& lhs, const auto& rhs) {
             if (lhs.form.plugin != rhs.form.plugin) return lhs.form.plugin < rhs.form.plugin;
             if (lhs.form.localFormID != rhs.form.localFormID) return lhs.form.localFormID < rhs.form.localFormID;
+            if (lhs.slot != rhs.slot) return lhs.slot < rhs.slot;
+            if (lhs.attachmentNode != rhs.attachmentNode) return lhs.attachmentNode < rhs.attachmentNode;
             return lhs.objectNode < rhs.objectNode;
         });
+        state.objects.erase(
+            std::unique(state.objects.begin(), state.objects.end(), SameLogicalObject),
+            state.objects.end());
 
-        const auto signature = MakeSignature(state);
-        if (signature != _lastSignature) {
-            _lastSignature = signature;
+        const auto payload = EncodeLocalIEDState(state);
+        bool changed = false;
+        {
+            std::scoped_lock lock(_stateMutex);
+            changed = payload != _lastPayload;
+            if (changed) {
+                _lastState = state;
+                _lastPayload = payload;
+            }
+        }
 
+        if (changed) {
             std::size_t slotCount = 0;
             for (const auto& slot : state.slots) {
                 slotCount += slot.has_value() ? 1 : 0;
             }
             const auto customCount = std::ranges::count_if(
                 state.objects,
-                [](const CapturedIEDObject& object) { return !object.slot.has_value(); });
+                [](const CapturedIEDObject& object) { return object.kind == IEDObjectKind::kCustom; });
 
             SKSE::log::info(
-                "LOCAL IED STATE CHANGED: slots={} sceneObjects={} customCandidates={}",
+                "LOCAL IED STATE CHANGED: slots={} sceneObjects={} customObjects={} payloadBytes={}",
                 slotCount,
                 state.objects.size(),
-                customCount);
+                customCount,
+                payload.size());
 
             for (std::size_t i = 0; i < state.slots.size(); ++i) {
                 if (const auto& slot = state.slots[i]) {
@@ -258,7 +280,7 @@ namespace IEDSyncTogether
             for (const auto& object : state.objects) {
                 SKSE::log::info(
                     "LOCAL IED OBJECT: kind={} slot={} visible={} plugin=\"{}\" localForm={:X} object=\"{}\" attachment=\"{}\" anchor=\"{}\" pos=({:.3f},{:.3f},{:.3f}) scale={:.3f} rotM=[{:.3f},{:.3f},{:.3f};{:.3f},{:.3f},{:.3f};{:.3f},{:.3f},{:.3f}]",
-                    object.slot ? "slot" : "custom",
+                    object.kind == IEDObjectKind::kSlot ? "slot" : "custom",
                     object.slot ? static_cast<int>(*object.slot) : -1,
                     object.visible ? 1 : 0,
                     object.form.plugin,
