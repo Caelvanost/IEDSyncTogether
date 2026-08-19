@@ -2,14 +2,14 @@
 
 Compatibility layer between Immersive Equipment Displays (IED) and Skyrim Together Reborn.
 
-## v0.6.0 — STRPM state transport
+## v0.6.1 — resilient STRPM state transport
 
-The `strpm` branch now has two active responsibilities:
+The `strpm` branch has two active responsibilities:
 
 1. capture the authoritative evaluated IED state of the local `PlayerCharacter`;
 2. publish/receive that serialized state through STRPluginMessagingAPI (STRPM).
 
-Remote rendering is deliberately still disabled. v0.6.0 validates transport independently before the received state is applied to Skyrim Together proxies.
+Remote rendering is deliberately still disabled. v0.6.1 hardens state delivery before received state is applied to Skyrim Together proxies.
 
 ### Local state
 
@@ -36,7 +36,7 @@ strpm.iedsynctogether.state.v1
 
 Messages are sent to `TargetKind::kAllPlayers` with reliable + ordered flags.
 
-On receive, v0.6.0:
+On receive, v0.6.1:
 
 - ignores local loopback by `ConnectionID`;
 - validates payload size;
@@ -44,17 +44,44 @@ On receive, v0.6.0:
 - logs sender identity, sequence, slot count, object count and Custom Item count;
 - does **not** yet render anything on the remote proxy.
 
-Expected transport logs:
+### v0.6.1 delivery behavior
+
+The adapter now keeps the latest complete local snapshot independently from immediate transport availability.
+
+If a state changes before the Skyrim Together transport is ready:
 
 ```text
-STRPM adapter started: channel=strpm.iedsynctogether.state.v1 player="..." connectionID=...
-STRPM IED STATE TX: bytes=... objects=... customObjects=...
+capture
+  -> immediate send fails
+  -> latest state remains pending
+  -> retry every 1 second
+  -> connection becomes usable
+  -> latest state is delivered automatically
+```
+
+Only a change in the failure result is logged, so being offline does not generate one warning every second.
+
+After the first successful send, the current complete state is also retransmitted every 10 seconds as a heartbeat. This lets a player who joins the STR session later receive the current IED state without requiring the owner to equip/unequip something artificially.
+
+`kPreLoadGame` clears the pending snapshot so state from a previous save cannot be replayed into a newly loaded game.
+
+The adapter also refreshes the STRPM local `ConnectionID` and display name before sends, allowing identity established after initial game startup to replace early values such as `Prisoner`.
+
+Expected transport logs include:
+
+```text
+STRPM adapter started: channel=strpm.iedsynctogether.state.v1 player="..." connectionID=... retry=1s heartbeat=10s
+STRPM IED STATE TX deferred: reason=change result=transport error bytes=...
+STRPM IED transport resumed; latest pending state delivered
+STRPM IED STATE TX: reason=pending bytes=... objects=... customObjects=...
+STRPM IED STATE TX: reason=change bytes=... objects=... customObjects=...
+STRPM IED STATE TX heartbeat: bytes=... objects=... customObjects=...
 STRPM IED STATE RX: sender=... name="..." sequence=... bytes=... slots=... objects=... customObjects=... (remote rendering disabled)
 ```
 
 ### Runtime cleanup
 
-The v0.6.0 CMake target no longer compiles the old IEDSyncTogether networking/runtime stack:
+The `strpm` CMake target does not compile the old IEDSyncTogether networking/runtime stack:
 
 - `Config`
 - `ProxyResolver`
@@ -63,7 +90,7 @@ The v0.6.0 CMake target no longer compiles the old IEDSyncTogether networking/ru
 - `UdpTransport`
 - `SyncService`
 
-Those source files remain in repository history for reference, but are not part of the `strpm` runtime. The package also no longer installs the obsolete IEDSyncTogether network INI.
+Those source files remain in repository history for reference, but are not part of the `strpm` runtime. The package does not install the obsolete IEDSyncTogether network INI.
 
 ## Architecture
 
@@ -81,6 +108,9 @@ EncodeLocalIEDState()
         |
         v
 STRPMAdapter
+   |         |
+   |         +-- pending retry (1 s)
+   +------------ current-state heartbeat (10 s)
         |
         v
 STRPluginMessagingAPI / Skyrim Together
@@ -94,8 +124,8 @@ DecodeLocalIEDState()
         v
 Remote LocalIEDState
         |
-        +-- v0.6.0: log/validate only
-        +-- next: remote renderer
+        +-- v0.6.1: log/validate only
+        +-- next: proxy association + remote renderer
 ```
 
 ## Build
@@ -107,25 +137,26 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build-vortex.ps1
 Expected archive:
 
 ```text
-dist/IEDSyncTogether-v0.6.0.zip
+dist/IEDSyncTogether-v0.6.1.zip
 ```
 
 ## Test protocol
 
-For transport validation, install the same v0.6.0 archive on both players together with the current STRPluginMessagingAPI build.
+Install the same v0.6.1 archive on both players together with the current STRPluginMessagingAPI build.
 
-1. Launch both clients and connect through Skyrim Together.
-2. Confirm both logs contain `STRPM adapter started`.
-3. Change an IED favorite on Player1.
-4. Trigger Helmet Toggle remove/equip on Player1.
-5. Repeat one state change on Player2.
-6. Send both `IEDSyncTogether.log` files.
+1. Launch both Skyrim clients but leave at least one client disconnected from the STR server long enough for its first local IED state to be captured.
+2. Confirm that client logs one `STRPM IED STATE TX deferred`.
+3. Connect both players to the same STR server without changing equipment.
+4. Confirm the previously pending state is automatically sent with `reason=pending` and received by the other player.
+5. Wait at least 10 seconds without changing equipment and confirm a heartbeat is sent/received.
+6. Change a normal IED favorite and trigger Helmet Toggle remove/equip on each player.
+7. Send both `IEDSyncTogether.log` files from the same session.
 
-The important validation is that every local `LOCAL IED STATE CHANGED` produces a matching `STRPM IED STATE TX` and a corresponding `STRPM IED STATE RX` on the other client with matching payload size/object counts.
+With NPC Displays disabled, no remote gear is expected to appear yet: v0.6.1 validates delivery only. The next stage is associating each received state with the STR proxy actor and applying the renderer.
 
 ## Safety
 
-The capture path uses the public IED slot getter and Skyrim's evaluated scene graph. It does not detour private IED runtime functions and does not mutate IED controller/configuration state. The v0.6.0 receive path only decodes/logs remote state; it does not modify remote actors yet.
+The capture path uses the public IED slot getter and Skyrim's evaluated scene graph. It does not detour private IED runtime functions and does not mutate IED controller/configuration state. The v0.6.1 receive path only decodes/logs remote state; it does not modify remote actors yet.
 
 ## License
 
