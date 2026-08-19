@@ -1,6 +1,8 @@
 #include "PCH.h"
 #include "STRPMAdapter.h"
 
+#include "RemoteIEDRenderer.h"
+
 #include <Windows.h>
 
 namespace IEDSyncTogether
@@ -62,8 +64,26 @@ namespace IEDSyncTogether
                 STRPM::ResultToString(result));
             return false;
         }
-
         _api = api;
+
+        const auto rawResolverQuery = GetProcAddress(module, STRPM::kQueryProxyResolverExportName);
+        if (!rawResolverQuery) {
+            SKSE::log::warn("STRPM ProxyResolver unavailable: query export missing");
+            return true;
+        }
+
+        const auto resolverQuery = reinterpret_cast<STRPM::QueryProxyResolverFn>(rawResolverQuery);
+        const STRPM::ProxyResolverInterface* resolver = nullptr;
+        const auto resolverResult = resolverQuery(STRPM::kProxyResolverVersion, &resolver);
+        if (resolverResult != STRPM::Result::kOk || !resolver ||
+            resolver->version != STRPM::kProxyResolverVersion || !resolver->resolve) {
+            SKSE::log::warn(
+                "STRPM ProxyResolver unavailable: query failed ({})",
+                STRPM::ResultToString(resolverResult));
+            return true;
+        }
+
+        _resolver = resolver;
         return true;
     }
 
@@ -102,19 +122,34 @@ namespace IEDSyncTogether
         if (result != STRPM::Result::kOk) {
             SKSE::log::warn("STRPM registerChannel failed: {}", STRPM::ResultToString(result));
             _api = nullptr;
+            _resolver = nullptr;
             _listener = {};
             return false;
         }
 
         _running.store(true);
+
+        if (_resolver && _resolver->registerListener) {
+            const auto resolverResult = _resolver->registerListener(&STRPMAdapter::OnProxyMapping, this);
+            if (resolverResult == STRPM::Result::kOk) {
+                _proxyListenerRegistered = true;
+                SKSE::log::info("STRPM ProxyResolver listener registered");
+            } else {
+                SKSE::log::warn(
+                    "STRPM ProxyResolver listener registration failed: {}",
+                    STRPM::ResultToString(resolverResult));
+            }
+        }
+
         _retryTimer = std::jthread([this](std::stop_token token) { RetryLoop(token); });
         SKSE::log::info(
-            "STRPM adapter started: channel={} player=\"{}\" connectionID={} retry={}s heartbeat={}s",
+            "STRPM adapter started: channel={} player=\"{}\" connectionID={} retry={}s heartbeat={}s proxyResolverReady={}",
             kChannel,
             GetLocalPlayerName(),
             _localConnectionID.load(),
             kRetryInterval.count(),
-            kHeartbeatInterval.count());
+            kHeartbeatInterval.count(),
+            _resolver ? 1 : 0);
         return true;
     }
 
@@ -129,26 +164,55 @@ namespace IEDSyncTogether
             _retryTimer.join();
         }
 
+        if (_resolver && _proxyListenerRegistered && _resolver->unregisterListener) {
+            (void)_resolver->unregisterListener(&STRPMAdapter::OnProxyMapping, this);
+        }
+        _proxyListenerRegistered = false;
+
         if (_api && _api->unregisterChannel && _listener.value != 0) {
             (void)_api->unregisterChannel(_listener);
         }
 
-        Reset();
+        {
+            std::scoped_lock lock(_stateMutex);
+            _latestState = {};
+            _latestPayload.clear();
+            _pending = false;
+            _haveSuccessfulSend = false;
+            _lastFailure.reset();
+            _lastSuccessfulSend = {};
+        }
+        {
+            std::scoped_lock lock(_remoteMutex);
+            _remoteStates.clear();
+        }
+
         _listener = {};
         _localConnectionID.store(0);
+        _resolver = nullptr;
         _api = nullptr;
         SKSE::log::info("STRPM adapter stopped");
     }
 
     void STRPMAdapter::Reset()
     {
-        std::scoped_lock lock(_stateMutex);
-        _latestState = {};
-        _latestPayload.clear();
-        _pending = false;
-        _haveSuccessfulSend = false;
-        _lastFailure.reset();
-        _lastSuccessfulSend = {};
+        {
+            std::scoped_lock lock(_stateMutex);
+            _latestState = {};
+            _latestPayload.clear();
+            _pending = false;
+            _haveSuccessfulSend = false;
+            _lastFailure.reset();
+            _lastSuccessfulSend = {};
+        }
+        {
+            std::scoped_lock lock(_remoteMutex);
+            _remoteStates.clear();
+        }
+
+        if (auto* tasks = SKSE::GetTaskInterface()) {
+            tasks->AddTask([]() { RemoteIEDRenderer::GetSingleton().Reset(); });
+        }
     }
 
     void STRPMAdapter::Publish(const LocalIEDState& state, std::string_view payload)
@@ -319,6 +383,127 @@ namespace IEDSyncTogether
         }
     }
 
+    void STRPMAdapter::QueueRemoteApply(STRPM::ConnectionID connectionID, bool force)
+    {
+        if (connectionID == 0) {
+            return;
+        }
+        if (auto* tasks = SKSE::GetTaskInterface()) {
+            tasks->AddTask([connectionID, force]() {
+                STRPMAdapter::GetSingleton().ApplyRemoteOnGameThread(connectionID, force);
+            });
+        }
+    }
+
+    void STRPMAdapter::ApplyRemoteOnGameThread(STRPM::ConnectionID connectionID, bool force)
+    {
+        if (!_running.load() || !_resolver || !_resolver->resolve) {
+            return;
+        }
+
+        RemoteSnapshot snapshot;
+        {
+            std::scoped_lock lock(_remoteMutex);
+            const auto it = _remoteStates.find(connectionID);
+            if (it == _remoteStates.end()) {
+                return;
+            }
+            snapshot = it->second;
+        }
+
+        STRPM::ProxyFormID proxyFormID = STRPM::kInvalidProxyFormID;
+        const auto result = _resolver->resolve(connectionID, &proxyFormID);
+        if (result != STRPM::Result::kOk || proxyFormID == STRPM::kInvalidProxyFormID) {
+            SKSE::log::debug(
+                "REMOTE IED mapping pending: connection={} name=\"{}\" result={}",
+                connectionID,
+                snapshot.displayName,
+                STRPM::ResultToString(result));
+            return;
+        }
+
+        SKSE::log::info(
+            "REMOTE IED mapping resolved: connection={} name=\"{}\" proxy={:08X} sequence={}",
+            connectionID,
+            snapshot.displayName,
+            proxyFormID,
+            snapshot.sequence);
+
+        (void)RemoteIEDRenderer::GetSingleton().Apply(
+            connectionID,
+            proxyFormID,
+            snapshot.displayName,
+            snapshot.state,
+            force);
+    }
+
+    void STRPMAdapter::HandleProxyMappingOnGameThread(STRPM::ProxyMappingEvent event)
+    {
+        if (!_running.load()) {
+            return;
+        }
+
+        switch (event.type) {
+        case STRPM::ProxyMappingEventType::kAdded:
+            SKSE::log::info(
+                "STRPM proxy mapping added: connection={} proxy={:08X}",
+                event.connectionID,
+                event.newFormID);
+            ApplyRemoteOnGameThread(event.connectionID, true);
+            break;
+
+        case STRPM::ProxyMappingEventType::kUpdated:
+            SKSE::log::info(
+                "STRPM proxy mapping updated: connection={} old={:08X} new={:08X}",
+                event.connectionID,
+                event.oldFormID,
+                event.newFormID);
+            if (event.oldFormID != STRPM::kInvalidProxyFormID && event.oldFormID != event.newFormID) {
+                RemoteIEDRenderer::GetSingleton().ClearProxy(event.oldFormID);
+            }
+            ApplyRemoteOnGameThread(event.connectionID, true);
+            break;
+
+        case STRPM::ProxyMappingEventType::kRemoved:
+            SKSE::log::info(
+                "STRPM proxy mapping removed: connection={} proxy={:08X}",
+                event.connectionID,
+                event.oldFormID);
+            RemoteIEDRenderer::GetSingleton().ClearProxy(event.oldFormID);
+            {
+                std::scoped_lock lock(_remoteMutex);
+                _remoteStates.erase(event.connectionID);
+            }
+            break;
+
+        case STRPM::ProxyMappingEventType::kCleared:
+            SKSE::log::info("STRPM proxy mappings cleared");
+            RemoteIEDRenderer::GetSingleton().Reset();
+            {
+                std::scoped_lock lock(_remoteMutex);
+                _remoteStates.clear();
+            }
+            break;
+        }
+    }
+
+    void STRPM_CALL STRPMAdapter::OnProxyMapping(
+        const STRPM::ProxyMappingEvent* event,
+        void* userData)
+    {
+        auto* self = static_cast<STRPMAdapter*>(userData);
+        if (!self || !self->_running.load() || !event) {
+            return;
+        }
+
+        const auto copy = *event;
+        if (auto* tasks = SKSE::GetTaskInterface()) {
+            tasks->AddTask([copy]() {
+                STRPMAdapter::GetSingleton().HandleProxyMappingOnGameThread(copy);
+            });
+        }
+    }
+
     void STRPM_CALL STRPMAdapter::OnMessage(const STRPM::Message* message, void* userData)
     {
         auto* self = static_cast<STRPMAdapter*>(userData);
@@ -357,14 +542,28 @@ namespace IEDSyncTogether
             slotCount += slot.has_value() ? 1u : 0u;
         }
 
+        const auto senderID = message->sender.connectionID;
+        const std::string senderName = message->sender.displayName ? message->sender.displayName : "";
+        {
+            std::scoped_lock lock(self->_remoteMutex);
+            self->_remoteStates[senderID] = RemoteSnapshot{
+                std::move(*state),
+                senderName,
+                message->sequence
+            };
+        }
+
         SKSE::log::info(
-            "STRPM IED STATE RX: sender={} name=\"{}\" sequence={} bytes={} slots={} objects={} customObjects={} (remote rendering disabled)",
-            message->sender.connectionID,
-            message->sender.displayName ? message->sender.displayName : "",
+            "STRPM IED STATE RX: sender={} name=\"{}\" sequence={} bytes={} slots={} objects={} customObjects={} renderQueued={}",
+            senderID,
+            senderName,
             message->sequence,
             message->size,
             slotCount,
-            state->objects.size(),
-            customCount);
+            self->_remoteStates[senderID].state.objects.size(),
+            customCount,
+            self->_resolver ? 1 : 0);
+
+        self->QueueRemoteApply(senderID, false);
     }
 }
