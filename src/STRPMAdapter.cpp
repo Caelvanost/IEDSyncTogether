@@ -534,6 +534,13 @@ namespace IEDSyncTogether
             return;
         }
 
+        const auto senderID = message->sender.connectionID;
+        if (senderID == 0) {
+            SKSE::log::warn("STRPM IED state RX ignored: sender ConnectionID is zero");
+            return;
+        }
+
+        const auto objectCount = state->objects.size();
         const auto customCount = std::ranges::count_if(
             state->objects,
             [](const CapturedIEDObject& object) { return object.kind == IEDObjectKind::kCustom; });
@@ -542,7 +549,6 @@ namespace IEDSyncTogether
             slotCount += slot.has_value() ? 1u : 0u;
         }
 
-        const auto senderID = message->sender.connectionID;
         const std::string senderName = message->sender.displayName ? message->sender.displayName : "";
         {
             std::scoped_lock lock(self->_remoteMutex);
@@ -560,7 +566,7 @@ namespace IEDSyncTogether
             message->sequence,
             message->size,
             slotCount,
-            self->_remoteStates[senderID].state.objects.size(),
+            objectCount,
             customCount,
             self->_resolver ? 1 : 0);
 
