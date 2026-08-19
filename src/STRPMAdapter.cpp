@@ -85,8 +85,11 @@ namespace IEDSyncTogether
         }
 
         if (_api->getLocalConnectionID) {
-            const auto result = _api->getLocalConnectionID(&_localConnectionID);
-            if (result != STRPM::Result::kOk) {
+            STRPM::ConnectionID localID = 0;
+            const auto result = _api->getLocalConnectionID(&localID);
+            if (result == STRPM::Result::kOk) {
+                _localConnectionID.store(localID);
+            } else {
                 SKSE::log::warn("STRPM getLocalConnectionID failed: {}", STRPM::ResultToString(result));
             }
         }
@@ -109,7 +112,7 @@ namespace IEDSyncTogether
             "STRPM adapter started: channel={} player=\"{}\" connectionID={} retry={}s heartbeat={}s",
             kChannel,
             GetLocalPlayerName(),
-            _localConnectionID,
+            _localConnectionID.load(),
             kRetryInterval.count(),
             kHeartbeatInterval.count());
         return true;
@@ -132,7 +135,7 @@ namespace IEDSyncTogether
 
         Reset();
         _listener = {};
-        _localConnectionID = 0;
+        _localConnectionID.store(0);
         _api = nullptr;
         SKSE::log::info("STRPM adapter stopped");
     }
@@ -183,7 +186,7 @@ namespace IEDSyncTogether
         if (_api->getLocalConnectionID) {
             STRPM::ConnectionID currentID = 0;
             if (_api->getLocalConnectionID(&currentID) == STRPM::Result::kOk && currentID != 0) {
-                _localConnectionID = currentID;
+                _localConnectionID.store(currentID);
             }
         }
 
@@ -326,8 +329,9 @@ namespace IEDSyncTogether
             SKSE::log::warn("STRPM IED state RX dropped: payload too large ({} bytes)", message->size);
             return;
         }
-        if (message->sender.connectionID != 0 && self->_localConnectionID != 0 &&
-            message->sender.connectionID == self->_localConnectionID) {
+        const auto localConnectionID = self->_localConnectionID.load();
+        if (message->sender.connectionID != 0 && localConnectionID != 0 &&
+            message->sender.connectionID == localConnectionID) {
             return;
         }
 
