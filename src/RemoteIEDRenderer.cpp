@@ -8,6 +8,8 @@
 #include <RE/P/PackUnpack.h>
 #include <RE/S/SkyrimVM.h>
 
+#include <cmath>
+
 namespace IEDSyncTogether
 {
     namespace
@@ -106,20 +108,42 @@ namespace IEDSyncTogether
 
         std::array<float, 3> RotationDegrees(const CapturedIEDObject& object)
         {
-            RE::NiMatrix3 matrix{};
-            std::size_t index = 0;
-            for (std::size_t row = 0; row < 3; ++row) {
-                for (std::size_t col = 0; col < 3; ++col) {
-                    matrix.entry[row][col] = object.rotationMatrix[index++];
-                }
+            // IED's Papyrus SetItemRotation* API takes (Pitch, Roll, Yaw) and
+            // stores those values in configTransform_t, whose default rotation
+            // mode is extrinsic. IED then reconstructs the matrix with
+            // SetEulerAnglesExtrinsic(x, y, z). Therefore we must invert that
+            // exact convention instead of using NiMatrix3::ToEulerAnglesXYZ,
+            // which produces a different Euler convention/order.
+            //
+            // For fixed-axis/extrinsic XYZ:
+            //     R = Rz(z) * Ry(y) * Rx(x)
+            // so:
+            //     y = asin(-R20)
+            //     x = atan2(R21, R22)
+            //     z = atan2(R10, R00)
+            // with a stable gimbal-lock branch.
+            const auto& m = object.rotationMatrix;
+
+            const float sinY = std::clamp(-m[6], -1.0f, 1.0f);  // -R20
+            const float y = std::asin(sinY);
+            const float cosY = std::cos(y);
+
+            float x = 0.0f;
+            float z = 0.0f;
+            if (std::abs(cosY) > 1.0e-5f) {
+                x = std::atan2(m[7], m[8]);  // R21, R22
+                z = std::atan2(m[3], m[0]);  // R10, R00
+            } else {
+                // At +/-90 degrees Y, X and Z are coupled. Pick Z=0 and solve X
+                // from the remaining stable matrix terms.
+                x = std::atan2(-m[5], m[4]);  // -R12, R11
+                z = 0.0f;
             }
 
-            RE::NiPoint3 euler{};
-            matrix.ToEulerAnglesXYZ(euler);
             return {
-                euler.x * kRadiansToDegrees,
-                euler.y * kRadiansToDegrees,
-                euler.z * kRadiansToDegrees
+                x * kRadiansToDegrees,
+                y * kRadiansToDegrees,
+                z * kRadiansToDegrees
             };
         }
 
@@ -317,7 +341,7 @@ namespace IEDSyncTogether
 
             ++rendered;
             SKSE::log::info(
-                "REMOTE IED SLOT queued: connection={} name=\"{}\" proxy={:08X} slot={} plugin=\"{}\" localForm={:X} node=\"{}\" nodeSource={} pos=({:.3f},{:.3f},{:.3f}) rotDeg=({:.3f},{:.3f},{:.3f}) scale={:.3f} capturedAttachment=\"{}\" capturedAnchor=\"{}\"",
+                "REMOTE IED SLOT queued: connection={} name=\"{}\" proxy={:08X} slot={} plugin=\"{}\" localForm={:X} node=\"{}\" nodeSource={} pos=({:.3f},{:.3f},{:.3f}) rotExtrinsicDeg=({:.3f},{:.3f},{:.3f}) scale={:.3f} capturedAttachment=\"{}\" capturedAnchor=\"{}\"",
                 connectionID,
                 displayName,
                 proxyFormID,
