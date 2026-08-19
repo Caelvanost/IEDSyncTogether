@@ -42,6 +42,7 @@ namespace
             break;
         }
         case SKSE::MessagingInterface::kPreLoadGame:
+            STRPMAdapter::GetSingleton().Reset();
             LocalCaptureProbe::GetSingleton().Reset();
             break;
         default:
