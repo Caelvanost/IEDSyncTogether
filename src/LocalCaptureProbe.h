@@ -8,12 +8,15 @@ namespace IEDSyncTogether
     class LocalCaptureProbe
     {
     public:
+        using StateChangedHandler = std::function<void(const LocalIEDState&, std::string_view)>;
+
         static LocalCaptureProbe& GetSingleton();
 
         void Start();
         void Stop();
         void Reset();
 
+        void SetStateChangedHandler(StateChangedHandler handler);
         LocalIEDState GetLastState() const;
         std::string GetLastPayload() const;
 
@@ -29,5 +32,6 @@ namespace IEDSyncTogether
         mutable std::mutex _stateMutex;
         LocalIEDState _lastState;
         std::string _lastPayload;
+        StateChangedHandler _stateChangedHandler;
     };
 }
