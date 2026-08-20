@@ -2,6 +2,7 @@
 
 #include "IEDSyncTogether/Interface.h"
 #include "LocalCaptureProbe.h"
+#include "ProxyRegistry.h"
 #include "RemoteIEDRenderer.h"
 #include "STRPMAdapter.h"
 
@@ -40,7 +41,7 @@ namespace
                 });
             capture.Start();
             SKSE::log::info(
-                "STRPM branch mode: local capture + STRPM transport + ProxyResolver + raw-scenegraph slot/custom renderer + transform watchdog; transportReady={}",
+                "STRPM branch mode: local capture + STRPM transport + ProxyResolver + patched-IED proxy isolation + raw-scenegraph slot/custom renderer + transform watchdog; transportReady={}",
                 transportReady ? 1 : 0);
             break;
         }
@@ -75,12 +76,25 @@ extern "C" std::uint32_t IEDST_GetInterfaceVersion() noexcept
 }
 
 extern "C" std::uint32_t IEDST_QuerySlotOverride(
-    std::uint32_t,
-    std::uint32_t,
+    std::uint32_t actorFormID,
+    std::uint32_t slotIndex,
     std::uint32_t* outFormID) noexcept
 {
     if (outFormID) {
         *outFormID = 0;
     }
-    return static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kNotRemote);
+
+    if (slotIndex >= IEDST::kSlotCount ||
+        !IEDSyncTogether::ProxyRegistry::GetSingleton().Contains(actorFormID)) {
+        return static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kNotRemote);
+    }
+
+    // Standard IED slot processing must be empty on STR proxies. IEDSyncTogether
+    // recreates the authoritative sender slot state as actor Custom Items instead.
+    return static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kEmpty);
+}
+
+extern "C" std::uint32_t IEDST_IsRemoteProxy(std::uint32_t actorFormID) noexcept
+{
+    return IEDSyncTogether::ProxyRegistry::GetSingleton().Contains(actorFormID) ? 1u : 0u;
 }
