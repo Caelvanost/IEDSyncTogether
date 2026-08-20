@@ -79,13 +79,18 @@ namespace IEDSyncTogether
         {
             std::string node;
             std::string_view source;
+            bool parentAttachment{ false };
         };
 
         NodeSelection SlotNode(const CapturedIEDObject& object, std::size_t slot)
         {
             if (!object.anchorNode.empty() &&
                 (object.anchorNode.starts_with("MOV ") || object.anchorNode.starts_with("CME "))) {
-                return { object.anchorNode, "captured-anchor" };
+                // MOV/CME scene nodes are not IED managed-node descriptors. The
+                // captured OBJECT ... transform is already expressed in this
+                // parent frame, so use parent attachment mode. Reference mode
+                // would pre-multiply anchor.local a second time.
+                return { object.anchorNode, "captured-anchor", true };
             }
 
             constexpr std::string_view kReferencePrefix = "OBJECT R ";
@@ -94,16 +99,16 @@ namespace IEDSyncTogether
             if (object.attachmentNode.starts_with(kReferencePrefix)) {
                 const auto suffix = std::string_view(object.attachmentNode).substr(kReferencePrefix.size());
                 if (!suffix.empty()) {
-                    return { std::string(suffix), "captured-attachment" };
+                    return { std::string(suffix), "captured-attachment", false };
                 }
             }
             if (object.attachmentNode.starts_with(kParentPrefix)) {
                 const auto suffix = std::string_view(object.attachmentNode).substr(kParentPrefix.size());
                 if (!suffix.empty()) {
-                    return { std::string(suffix), "captured-attachment" };
+                    return { std::string(suffix), "captured-attachment", true };
                 }
             }
-            return { std::string(kGearNodes[slot]), "slot-fallback" };
+            return { std::string(kGearNodes[slot]), "slot-fallback", false };
         }
 
         std::array<float, 3> RotationDegrees(const CapturedIEDObject& object)
@@ -111,9 +116,7 @@ namespace IEDSyncTogether
             // IED's Papyrus SetItemRotation* API takes (Pitch, Roll, Yaw) and
             // stores those values in configTransform_t, whose default rotation
             // mode is extrinsic. IED then reconstructs the matrix with
-            // SetEulerAnglesExtrinsic(x, y, z). Therefore we must invert that
-            // exact convention instead of using NiMatrix3::ToEulerAnglesXYZ,
-            // which produces a different Euler convention/order.
+            // SetEulerAnglesExtrinsic(x, y, z).
             //
             // For fixed-axis/extrinsic XYZ:
             //     R = Rz(z) * Ry(y) * Rx(x)
@@ -134,8 +137,6 @@ namespace IEDSyncTogether
                 x = std::atan2(m[7], m[8]);  // R21, R22
                 z = std::atan2(m[3], m[0]);  // R10, R00
             } else {
-                // At +/-90 degrees Y, X and Z are coupled. Pick Z=0 and solve X
-                // from the remaining stable matrix terms.
                 x = std::atan2(-m[5], m[4]);  // -R12, R11
                 z = 0.0f;
             }
@@ -305,6 +306,17 @@ namespace IEDSyncTogether
                 remoteForm);
 
             for (const bool female : { false, true }) {
+                if (nodeSelection.parentAttachment) {
+                    dispatched &= DispatchNoResult(
+                        "SetItemAttachmentModeActor",
+                        static_cast<RE::Actor*>(actor),
+                        std::string(kPluginKey),
+                        itemName,
+                        female,
+                        1,
+                        false);
+                }
+
                 dispatched &= DispatchNoResult(
                     "SetItemNodeActor",
                     static_cast<RE::Actor*>(actor),
@@ -341,7 +353,7 @@ namespace IEDSyncTogether
 
             ++rendered;
             SKSE::log::info(
-                "REMOTE IED SLOT queued: connection={} name=\"{}\" proxy={:08X} slot={} plugin=\"{}\" localForm={:X} node=\"{}\" nodeSource={} pos=({:.3f},{:.3f},{:.3f}) rotExtrinsicDeg=({:.3f},{:.3f},{:.3f}) scale={:.3f} capturedAttachment=\"{}\" capturedAnchor=\"{}\"",
+                "REMOTE IED SLOT queued: connection={} name=\"{}\" proxy={:08X} slot={} plugin=\"{}\" localForm={:X} node=\"{}\" nodeSource={} attachmentMode={} pos=({:.3f},{:.3f},{:.3f}) rotExtrinsicDeg=({:.3f},{:.3f},{:.3f}) scale={:.3f} capturedAttachment=\"{}\" capturedAnchor=\"{}\"",
                 connectionID,
                 displayName,
                 proxyFormID,
@@ -350,6 +362,7 @@ namespace IEDSyncTogether
                 object->form.localFormID,
                 nodeSelection.node,
                 nodeSelection.source,
+                nodeSelection.parentAttachment ? "parent" : "reference",
                 object->position[0], object->position[1], object->position[2],
                 rotationDegrees[0], rotationDegrees[1], rotationDegrees[2],
                 object->scale,
