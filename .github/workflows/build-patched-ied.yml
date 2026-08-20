@@ -2,6 +2,12 @@ name: Build patched IED 1.7.4
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - fix/helmet-toggle-ownership
+    paths:
+      - .github/workflows/build-patched-ied.yml
+      - integration/ied-dev/**
   push:
     branches:
       - feature/proxy-ied-isolation
@@ -192,7 +198,7 @@ jobs:
           if-no-files-found: error
 
       - name: Commit reproducible prebuilt DLL to test branch
-        if: github.ref == 'refs/heads/feature/proxy-ied-isolation'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/proxy-ied-isolation'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
