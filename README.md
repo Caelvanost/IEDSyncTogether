@@ -2,14 +2,16 @@
 
 Compatibility layer between Immersive Equipment Displays (IED) and Skyrim Together Reborn.
 
-## v0.8.0 — raw scenegraph transform replication
+## v0.9.0 — persistent raw-transform watchdog + Custom Item rendering
 
-The `strpm` branch now reproduces standard IED slot displays without converting the captured rotation matrix through Euler angles.
+The `strpm` branch now reproduces both standard IED slot displays and captured IED Custom Items on the correct remote STR proxy.
 
 ```text
-local evaluated IED object
+local evaluated IED state
         ↓
-anchor + exact local position + raw 3x3 matrix + scale
+slots + custom objects
+        ↓
+plugin/local FormID + attachment mode + exact local transform
         ↓
 LocalIEDState / STRPM
         ↓
@@ -17,9 +19,9 @@ STRPM ProxyResolver
         ↓
 remote STR proxy
         ↓
-IED creates/attaches the Custom Item
+IED creates/attaches IEDSyncTogether-owned Custom Items
         ↓
-IEDSyncTogether restores the exact NiAVObject::local transform
+IEDSyncTogether watchdog maintains exact NiAVObject::local transforms
 ```
 
 ### Requirements
@@ -29,7 +31,7 @@ IEDSyncTogether restores the exact NiAVObject::local transform
 - STRPluginMessagingAPI v0.8.2 or newer compatible build with ProxyResolver available
 - the relay/server files required by that STRPM build
 
-For renderer testing, disable IED **NPC Displays** on both clients so remote favorites visible in game are created by IEDSyncTogether rather than IED's normal NPC display path.
+For renderer testing, disable IED **NPC Displays** on both clients so remote displays visible in game are created by IEDSyncTogether rather than IED's normal NPC display path.
 
 ## Local capture
 
@@ -45,7 +47,7 @@ The authoritative local capture records:
 - raw 3x3 rotation matrix;
 - scale.
 
-The raw matrix remains the wire representation. Helmet Toggle 2 Custom Items are still captured and transported, but v0.8.0 continues to render only standard IED slot objects remotely.
+The raw matrix remains the wire representation. No Euler angles are serialized or used for the final remote orientation.
 
 ## STRPM transport and ProxyResolver
 
@@ -66,110 +68,149 @@ The resilient delivery behavior remains active:
 
 IEDSyncTogether uses STRPM's public ProxyResolver API only. It does not scan `ProcessLists`, compare actor names, or guess dynamic proxy FormIDs. Proxy mapping callbacks are forwarded to the SKSE game-task queue before actor lookup or IED rendering.
 
-## Why v0.8.0 exists
+## Standard slot renderer
 
-v0.7.1 through v0.7.4 established several useful facts:
+Standard favorites continue to use the v0.8 raw-scenegraph approach:
 
-- the correct remote STR proxy is resolved;
-- the correct standard favorites are reproduced;
-- the evaluated `MOV ...` anchors are captured correctly;
-- parent attachment mode is accepted for those evaluated anchors;
-- but weapon orientation still differs remotely.
+1. resolve `plugin + local FormID` on the receiving client;
+2. select the evaluated remote node/anchor;
+3. create an IED Custom Item owned by `IEDSyncTogether.esp`;
+4. preserve left-weapon semantics where required;
+5. call `IED.Evaluate`;
+6. find the actual generated `OBJECT ... [FormID]` scene object;
+7. restore its exact captured local position, raw 3x3 matrix and scale directly.
 
-The remaining weak point was the conversion path:
+This is the path that fixed the previously incorrect spear/bow/shield orientations.
 
-```text
-captured NiMatrix3
-    ↓
-Euler decomposition
-    ↓
-IED.SetItemRotationActor(Pitch, Roll, Yaw)
-    ↓
-IED rebuilds a matrix
-```
+## Persistent transform watchdog
 
-Even when the intended Euler convention was matched, the result still did not reproduce the owner's visual orientation exactly.
+v0.8.0 proved the raw transform itself is correct, but logs showed that IED can later re-evaluate an entry and restore its own temporary/default transform. The old immediate retries all completed before some of those late IED evaluations, so an item could remain incorrectly oriented until the next 10-second STRPM heartbeat.
 
-v0.8.0 removes that conversion entirely.
-
-## Remote renderer in v0.8.0
-
-IED is still used through its public Papyrus API to own the remote display lifecycle:
-
-1. create the Custom Item under `IEDSyncTogether.esp`;
-2. select the evaluated anchor;
-3. use parent attachment mode for captured `MOV ...` / `CME ...` anchors;
-4. apply left-weapon semantics when required;
-5. enable the entry;
-6. call `IED.Evaluate`.
-
-IEDSyncTogether deliberately does **not** send position/rotation/scale through the Papyrus transform setters anymore.
-
-After `IED.Evaluate`, IEDSyncTogether searches the remote proxy scene graph for the newly created IED object using:
-
-- the receiving client's resolved full FormID;
-- the expected IED attachment node (`OBJECT P ...` or `OBJECT R ...`).
-
-Once found, it writes the captured transform directly:
+v0.9.0 replaces those immediate retries with a persistent local watchdog:
 
 ```text
-remoteObject.local.translate = captured position
-remoteObject.local.rotate    = captured raw 3x3 matrix
-remoteObject.local.scale     = captured scale
+100 ms tick
+   ↓
+for every tracked remote IEDSyncTogether display
+   ↓
+measure rotation / position / scale delta
+   ↓
+if already correct: do nothing
+if changed by IED: restore exact raw transform immediately
 ```
 
-It then updates world-space data/bounds from that local transform.
+The watchdog generates no network traffic. It only reads and, when needed, repairs IEDSyncTogether-owned remote scene objects on the Skyrim game thread.
 
-This means no Euler convention exists in the final orientation path.
+Expected correction logs:
 
-## Raw patch retries
+```text
+REMOTE IED WATCHDOG acquired: ...
+REMOTE IED WATCHDOG corrected: ...
+```
 
-IED evaluation/model loading can complete after the Papyrus call returns, so v0.8.0 does not assume the object exists immediately.
+If IED resets the same object again later, trace logs show:
 
-Each expected standard display is searched for over multiple game-task passes. Once found, the raw transform is re-applied several times during the short settling period so asynchronous IED replacement/rebuild work cannot leave an unpatched first object behind.
+```text
+REMOTE IED WATCHDOG recorrected: ...
+```
 
-Unchanged heartbeats also queue a lightweight raw-transform refresh instead of rebuilding the whole IED entry. This provides a recovery path if another later IED evaluation resets the custom display transform.
+The target interval is 100 ms, so a late IED reset should no longer leave a visibly wrong orientation for several seconds.
+
+## Custom Item renderer
+
+v0.9.0 enables remote rendering for captured `IEDObjectKind::kCustom` objects.
+
+The renderer preserves the captured IED attachment mode directly from the scene graph:
+
+```text
+OBJECT P <node>  → parent attachment mode
+OBJECT R <node>  → reference attachment mode
+```
+
+It also resolves the transmitted form and applies the same raw scenegraph transform through the watchdog.
+
+This specifically covers Helmet Toggle 2 / DAV-style states already captured in previous tests.
+
+### Helmet in hand
+
+Captured locally as:
+
+```text
+OBJECT P AnimObjectR
+```
+
+Remote rendering uses:
+
+```text
+node = AnimObjectR
+attachmentMode = parent
+```
+
+### Helmet at the waist
+
+Captured locally as:
+
+```text
+OBJECT R ExtraPelvisArmorHelmet1
+```
+
+Remote rendering uses:
+
+```text
+node = ExtraPelvisArmorHelmet1
+attachmentMode = reference
+```
+
+The exact captured position, raw rotation matrix and scale are then maintained on the generated armor object.
+
+### Helmet absent
+
+When the sender's next full state no longer contains the Custom Item, IEDSyncTogether rebuilds its owned remote entries without that object. The remote helmet therefore disappears without any Helmet Toggle-specific protocol.
+
+The implementation is generic: other visible IED Custom Items using resolvable forms and `OBJECT P/R` attachment nodes follow the same path.
 
 ## Diagnostic logs
 
 Startup should include:
 
 ```text
-IEDSyncTogether v0.8.0 loading
-STRPM branch mode: ... raw-scenegraph standard-slot renderer ...
+IEDSyncTogether v0.9.0 loading
+REMOTE IED transform watchdog started: interval=100ms
+STRPM branch mode: ... raw-scenegraph slot/custom renderer + transform watchdog ...
 ```
 
-A standard display is first queued through IED:
+For a standard slot:
 
 ```text
 REMOTE IED SLOT queued: ...
-node="MOV WeaponSwordOnBack"
-attachmentMode=parent
-rawTransform=deferred
-expectedParent="OBJECT P MOV WeaponSwordOnBack"
+rawTransform=watchdog
 ```
 
-When the exact remote scene object appears, v0.8.0 logs the measured difference before and after the direct patch:
+For the helmet or another Custom Item:
 
 ```text
-REMOTE IED RAW XFORM applied: ...
-beforeDelta(rot=...,pos=...,scale=...)
-afterDelta(rot=0.000000,pos=0.000000,scale=0.000000)
-expectedRot=[...]
-beforeRot=[...]
-afterRot=[...]
+REMOTE IED CUSTOM queued: ...
+attachmentMode=parent|reference
+rawTransform=watchdog
+expectedParent="OBJECT P/R ..."
 ```
 
-After repeated successful settling passes:
+When the generated object becomes available:
 
 ```text
-REMOTE IED RAW XFORM verified: ...
-matrixDelta=0.000000
-positionDelta=0.000000
-scaleDelta=0.000000
+REMOTE IED WATCHDOG acquired: ... kind=custom ...
+REMOTE IED WATCHDOG corrected: ... afterDelta(rot=0...,pos=0...,scale=0...)
 ```
 
-These values are the decisive v0.8.0 diagnostic. They tell us whether the exact local transform reached the actual remote IED object, independently of visual interpretation.
+The renderer summary now reports:
+
+```text
+REMOTE IED RENDER queued: ...
+visibleSlots=...
+customRendered=...
+trackedTransforms=...
+watchdogIntervalMs=100
+```
 
 ## Build
 
@@ -180,28 +221,26 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build-vortex.ps1
 Expected archive:
 
 ```text
-dist/IEDSyncTogether-v0.8.0.zip
+dist/IEDSyncTogether-v0.9.0.zip
 ```
 
-## v0.8.0 test protocol
+## v0.9.0 test protocol
 
-Install the same v0.8.0 archive on Player1 and Player2 together with the current STRPM/ProxyResolver build.
+Install the same v0.9.0 archive on Player1 and Player2 together with the current STRPM/ProxyResolver build.
 
 1. Keep IED NPC Displays disabled on both clients.
 2. Connect both players to the same STR server.
-3. Leave Kahel's spear, bow and shield visible with the normal local IED presets active.
-4. Compare orientation and placement on Player2.
-5. Verify the log contains `REMOTE IED RAW XFORM applied` for every visible standard slot.
-6. Verify `afterDelta` and the later `REMOTE IED RAW XFORM verified` deltas are zero or extremely close to zero.
-7. Check the spear/backpack combination specifically.
-8. Verify Elir's visible favorites in the opposite direction.
-9. Send both `IEDSyncTogether.log` files if anything still differs visually.
-
-If the raw local matrices match exactly but the world-space visuals still differ, the next diagnostic target is no longer the item transform itself: it is the corresponding owner/remote anchor world transform and skeleton/node-override chain.
+3. Leave Kahel's normal favorites visible and verify their orientation remains correct after equipment/IED state changes.
+4. Trigger several changes quickly and watch for any multi-second wrong-orientation phase; the watchdog should correct late IED resets within roughly one tick.
+5. Put Kahel's helmet in hand and verify Player2 sees it on `AnimObjectR`.
+6. Move the helmet to the waist and verify Player2 sees it on `ExtraPelvisArmorHelmet1`.
+7. Hide/remove the Helmet Toggle Custom Item and verify it disappears remotely.
+8. Repeat in the opposite direction if Elir has a suitable Custom Item state.
+9. Send both `IEDSyncTogether.log` files if any display is missing, flickers persistently, or the watchdog repeatedly recorrects the same item.
 
 ## Safety
 
-The plugin still uses IED's public Papyrus API for Custom Item creation, attachment, enable/disable and cleanup. v0.8.0 additionally updates the local transform of the specific IEDSyncTogether-created scene object after it exists. It does not detour or patch private IED functions, and it does not modify unrelated IED entries.
+IED remains responsible for creation, attachment, enable/disable and cleanup through its public Papyrus Custom Item API. IEDSyncTogether only updates the local transform of the specific scene objects it created for remote synchronization. No private IED detours are reintroduced.
 
 ## License
 
