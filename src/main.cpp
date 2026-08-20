@@ -37,7 +37,7 @@ namespace
                 });
             capture.Start();
             SKSE::log::info(
-                "STRPM branch mode: local capture + STRPM transport + ProxyResolver + standard-slot remote renderer; Custom Item rendering disabled; transportReady={}",
+                "STRPM branch mode: local capture + STRPM transport + ProxyResolver + raw-scenegraph standard-slot renderer; Custom Item rendering disabled; transportReady={}",
                 transportReady ? 1 : 0);
             break;
         }
