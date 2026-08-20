@@ -246,9 +246,12 @@ namespace IEDSyncTogether
                     }
                 }
 
+                // Recompute world-space data from the exact local transform we
+                // just restored. Avoid NiAVObject::Update() here because that
+                // also runs controllers and could alter the local transform.
                 RE::NiUpdateData updateData{};
                 updateData.time = 0.0f;
-                remoteObject->Update(updateData);
+                remoteObject->UpdateWorldData(&updateData);
                 remoteObject->UpdateWorldBound();
 
                 const auto after = remoteObject->local;
