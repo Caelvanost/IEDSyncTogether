@@ -2,14 +2,14 @@
 
 Compatibility layer between Immersive Equipment Displays (IED) and Skyrim Together Reborn.
 
-## v0.7.4 — reproduce evaluated slot transforms in parent attachment mode
+## v0.8.0 — raw scenegraph transform replication
 
-The `strpm` branch reproduces the standard-slot visual result already evaluated by IED on the owning client:
+The `strpm` branch now reproduces standard IED slot displays without converting the captured rotation matrix through Euler angles.
 
 ```text
-local IED evaluated state
+local evaluated IED object
         ↓
-anchor + position + raw rotation matrix + scale
+anchor + exact local position + raw 3x3 matrix + scale
         ↓
 LocalIEDState / STRPM
         ↓
@@ -17,7 +17,9 @@ STRPM ProxyResolver
         ↓
 remote STR proxy
         ↓
-IED Custom Item owned by IEDSyncTogether
+IED creates/attaches the Custom Item
+        ↓
+IEDSyncTogether restores the exact NiAVObject::local transform
 ```
 
 ### Requirements
@@ -39,11 +41,11 @@ The authoritative local capture records:
 - slot/custom classification;
 - visibility/culling state;
 - object, attachment and evaluated anchor node names;
-- evaluated local XYZ position;
+- exact local XYZ position;
 - raw 3x3 rotation matrix;
 - scale.
 
-The raw matrix remains the wire representation. Helmet Toggle 2 Custom Items are still captured and transported, but v0.7.4 continues to render only standard IED slot objects remotely.
+The raw matrix remains the wire representation. Helmet Toggle 2 Custom Items are still captured and transported, but v0.8.0 continues to render only standard IED slot objects remotely.
 
 ## STRPM transport and ProxyResolver
 
@@ -64,82 +66,110 @@ The resilient delivery behavior remains active:
 
 IEDSyncTogether uses STRPM's public ProxyResolver API only. It does not scan `ProcessLists`, compare actor names, or guess dynamic proxy FormIDs. Proxy mapping callbacks are forwarded to the SKSE game-task queue before actor lookup or IED rendering.
 
-## Why v0.7.4 exists
+## Why v0.8.0 exists
 
-v0.7.1 selected the correct evaluated `MOV ...` anchor, while v0.7.2/v0.7.3 applied the captured position/rotation/scale. The remote weapons still had incorrect orientation.
+v0.7.1 through v0.7.4 established several useful facts:
 
-The remaining problem was IED's **attachment mode**.
+- the correct remote STR proxy is resolved;
+- the correct standard favorites are reproduced;
+- the evaluated `MOV ...` anchors are captured correctly;
+- parent attachment mode is accepted for those evaluated anchors;
+- but weapon orientation still differs remotely.
 
-IED Custom Items default to **reference mode**. In reference mode, IED evaluates an object transform as:
-
-```text
-item.local = referenceNode.local * configuredTransform
-```
-
-For standard IED equipment, the scene graph captured by IEDSyncTogether already contains the evaluated `OBJECT WEAPON` / `OBJECT SHIELD` local transform in the frame of its `MOV` parent. For example:
+The remaining weak point was the conversion path:
 
 ```text
-MOV WeaponSwordOnBack
-  └─ OBJECT R WeaponSword
-       └─ OBJECT WEAPON [...]
+captured NiMatrix3
+    ↓
+Euler decomposition
+    ↓
+IED.SetItemRotationActor(Pitch, Roll, Yaw)
+    ↓
+IED rebuilds a matrix
 ```
 
-The captured `OBJECT WEAPON.local` is therefore already the transform to reproduce **under the MOV frame**. v0.7.1-v0.7.3 targeted `MOV WeaponSwordOnBack` while leaving the Custom Item in IED's default reference mode, causing IED to pre-multiply `MOV.local` again.
+Even when the intended Euler convention was matched, the result still did not reproduce the owner's visual orientation exactly.
 
-v0.7.4 changes evaluated `MOV ...` / `CME ...` targets to IED **parent attachment mode**:
+v0.8.0 removes that conversion entirely.
+
+## Remote renderer in v0.8.0
+
+IED is still used through its public Papyrus API to own the remote display lifecycle:
+
+1. create the Custom Item under `IEDSyncTogether.esp`;
+2. select the evaluated anchor;
+3. use parent attachment mode for captured `MOV ...` / `CME ...` anchors;
+4. apply left-weapon semantics when required;
+5. enable the entry;
+6. call `IED.Evaluate`.
+
+IEDSyncTogether deliberately does **not** send position/rotation/scale through the Papyrus transform setters anymore.
+
+After `IED.Evaluate`, IEDSyncTogether searches the remote proxy scene graph for the newly created IED object using:
+
+- the receiving client's resolved full FormID;
+- the expected IED attachment node (`OBJECT P ...` or `OBJECT R ...`).
+
+Once found, it writes the captured transform directly:
 
 ```text
-SetItemAttachmentModeActor(..., 1, false)
+remoteObject.local.translate = captured position
+remoteObject.local.rotate    = captured raw 3x3 matrix
+remoteObject.local.scale     = captured scale
 ```
 
-IED then creates the Custom Item under the captured anchor and applies the transmitted transform directly:
+It then updates world-space data/bounds from that local transform.
 
-```text
-item.local = configuredTransform
-```
+This means no Euler convention exists in the final orientation path.
 
-This matches the coordinate space of the captured standard-slot object and avoids double-applying the anchor transform.
+## Raw patch retries
 
-The IED NodeMap contains managed nodes such as `WeaponSword`, `WeaponBow`, etc., but not the scene helper names prefixed with `MOV ` or `CME `. Therefore these captured anchors can legally use parent attachment mode. Generic managed-node fallbacks continue to use reference mode.
+IED evaluation/model loading can complete after the Papyrus call returns, so v0.8.0 does not assume the object exists immediately.
 
-## Remote renderer
+Each expected standard display is searched for over multiple game-task passes. Once found, the raw transform is re-applied several times during the short settling period so asynchronous IED replacement/rebuild work cannot leave an unpatched first object behind.
 
-For every visible standard IED slot object, v0.7.4:
+Unchanged heartbeats also queue a lightweight raw-transform refresh instead of rebuilding the whole IED entry. This provides a recovery path if another later IED evaluation resets the custom display transform.
 
-1. resolves the transmitted `plugin + local FormID` on the receiving client;
-2. creates an IED Custom Item on the correct STR proxy under `IEDSyncTogether.esp`;
-3. prefers the evaluated `MOV ...` / `CME ...` anchor captured on the owner;
-4. switches those captured anchors to **parent attachment mode**;
-5. applies the captured local position, raw rotation reconstructed at the IED Papyrus boundary, and scale directly in the anchor frame;
-6. falls back to captured attachment/generic slot nodes in reference mode only when no evaluated anchor is available;
-7. applies left-hand semantics where applicable;
-8. enables the item and calls `IED.Evaluate`.
-
-The renderer clears only Custom Items owned by `IEDSyncTogether.esp`. Heartbeats remain idempotent.
-
-## Expected logs
+## Diagnostic logs
 
 Startup should include:
 
 ```text
-IEDSyncTogether v0.7.4 loading
-STRPM ProxyResolver listener registered
-STRPM adapter started: ... proxyResolverReady=1
+IEDSyncTogether v0.8.0 loading
+STRPM branch mode: ... raw-scenegraph standard-slot renderer ...
 ```
 
-For Kahel's spear on Player2, the important renderer line should now include:
+A standard display is first queued through IED:
 
 ```text
 REMOTE IED SLOT queued: ...
 node="MOV WeaponSwordOnBack"
-nodeSource=captured-anchor
 attachmentMode=parent
-pos=(-11.891,1.917,6.666)
-rotExtrinsicDeg=(...,...,...)
-scale=1.000
+rawTransform=deferred
+expectedParent="OBJECT P MOV WeaponSwordOnBack"
 ```
 
-The bow and shield should likewise use `attachmentMode=parent` when their captured anchors are `MOV ...` nodes.
+When the exact remote scene object appears, v0.8.0 logs the measured difference before and after the direct patch:
+
+```text
+REMOTE IED RAW XFORM applied: ...
+beforeDelta(rot=...,pos=...,scale=...)
+afterDelta(rot=0.000000,pos=0.000000,scale=0.000000)
+expectedRot=[...]
+beforeRot=[...]
+afterRot=[...]
+```
+
+After repeated successful settling passes:
+
+```text
+REMOTE IED RAW XFORM verified: ...
+matrixDelta=0.000000
+positionDelta=0.000000
+scaleDelta=0.000000
+```
+
+These values are the decisive v0.8.0 diagnostic. They tell us whether the exact local transform reached the actual remote IED object, independently of visual interpretation.
 
 ## Build
 
@@ -150,27 +180,28 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build-vortex.ps1
 Expected archive:
 
 ```text
-dist/IEDSyncTogether-v0.7.4.zip
+dist/IEDSyncTogether-v0.8.0.zip
 ```
 
-## v0.7.4 test protocol
+## v0.8.0 test protocol
 
-Install the same v0.7.4 archive on Player1 and Player2 together with the current STRPM/ProxyResolver build.
+Install the same v0.8.0 archive on Player1 and Player2 together with the current STRPM/ProxyResolver build.
 
 1. Keep IED NPC Displays disabled on both clients.
 2. Connect both players to the same STR server.
 3. Leave Kahel's spear, bow and shield visible with the normal local IED presets active.
-4. Verify Player2 sees the correct anchor **and** orientation.
-5. Confirm the remote log shows `attachmentMode=parent` for the captured `MOV ...` anchors.
-6. Pay attention to the spear/backpack combination: both orientation and offset relative to the backpack should now be much closer to the owner's evaluated display.
-7. Verify Elir's visible favorite in the opposite direction.
-8. Send both `IEDSyncTogether.log` files if any orientation or offset still differs.
+4. Compare orientation and placement on Player2.
+5. Verify the log contains `REMOTE IED RAW XFORM applied` for every visible standard slot.
+6. Verify `afterDelta` and the later `REMOTE IED RAW XFORM verified` deltas are zero or extremely close to zero.
+7. Check the spear/backpack combination specifically.
+8. Verify Elir's visible favorites in the opposite direction.
+9. Send both `IEDSyncTogether.log` files if anything still differs visually.
 
-Helmet Toggle Custom Items remain intentionally excluded from remote rendering in v0.7.4; they are still captured and transported for the next stage.
+If the raw local matrices match exactly but the world-space visuals still differ, the next diagnostic target is no longer the item transform itself: it is the corresponding owner/remote anchor world transform and skeleton/node-override chain.
 
 ## Safety
 
-The capture path uses the public IED slot getter and Skyrim's evaluated scene graph. Proxy identity comes exclusively from the public STRPM ProxyResolver. Remote objects are created, attached and transformed through IED's public Papyrus Custom Item API under an IEDSyncTogether-owned key. No private IED runtime detours are used.
+The plugin still uses IED's public Papyrus API for Custom Item creation, attachment, enable/disable and cleanup. v0.8.0 additionally updates the local transform of the specific IEDSyncTogether-created scene object after it exists. It does not detour or patch private IED functions, and it does not modify unrelated IED entries.
 
 ## License
 
