@@ -1,0 +1,207 @@
+name: Build patched IED 1.7.4
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/proxy-ied-isolation
+    paths:
+      - .github/workflows/build-patched-ied.yml
+      - integration/ied-dev/**
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    env:
+      IED_COMMIT: 3f014c3e8574ef0e88b2ec0b7cdf58b86c9737b0
+      IED_CONFIGURATION: Release MT Post 629 143
+      VCPKG_TRIPLET: x64-windows-rel-static-143
+
+    steps:
+      - name: Checkout IEDSyncTogether
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Prepare IED 1.7.4 workspace
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'ied-workspace'
+          if (Test-Path $root) { Remove-Item $root -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+
+          git clone https://github.com/SlavicPotato/ied-dev.git (Join-Path $root 'ied-dev')
+          git -C (Join-Path $root 'ied-dev') checkout $env:IED_COMMIT
+
+          git clone https://github.com/clayne/sse-build-resources.git (Join-Path $root 'sse-build-resources')
+          git clone https://github.com/clayne/imgui.git (Join-Path $root 'imgui')
+          git clone --depth 1 https://github.com/bulletphysics/bullet3.git (Join-Path $root 'bullet3')
+          git clone --depth 1 https://github.com/herumi/xbyak.git (Join-Path $root 'xbyak')
+          git clone --depth 1 https://github.com/oneapi-src/oneTBB.git (Join-Path $root 'oneTBB')
+
+          "IED_WORKSPACE=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "IED_SOURCE_ROOT=$(Join-Path $root 'ied-dev')" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Prepare patched SKSE source used by sse-build-resources
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sse = Join-Path $env:IED_WORKSPACE 'sse-build-resources'
+          $archive = Join-Path $env:RUNNER_TEMP 'skse64_2_00_17.7z'
+          $extract = Join-Path $env:RUNNER_TEMP 'skse64-source'
+
+          curl.exe -L --fail --retry 3 -o $archive https://skse.silverlock.org/beta/skse64_2_00_17.7z
+          if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
+          & 7z x $archive "-o$extract" -y | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to extract SKSE source archive.' }
+
+          $src = Get-ChildItem -Path $extract -Directory -Recurse |
+            Where-Object { $_.Name -eq 'src' -and (Test-Path (Join-Path $_.FullName 'skse64')) } |
+            Select-Object -First 1
+          if (-not $src) { throw 'Unable to locate SKSE src directory.' }
+
+          $skseRoot = Join-Path $sse 'skse64'
+          if (Test-Path $skseRoot) { Remove-Item $skseRoot -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $skseRoot | Out-Null
+          Copy-Item -Path (Join-Path $src.FullName '*') -Destination $skseRoot -Recurse -Force
+
+          Expand-Archive -LiteralPath (Join-Path $sse 'skse64-patch.zip') -DestinationPath $skseRoot -Force
+
+          Push-Location $skseRoot
+          try {
+            git init
+            git config user.email 'actions@github.com'
+            git config user.name 'github-actions[bot]'
+            git add -A
+            git commit -m baseline
+
+            $patch = Get-ChildItem -Path $skseRoot -Filter 'skse64.patch' -Recurse | Select-Object -First 1
+            if ($patch) {
+              git apply $patch.FullName
+            }
+          } finally {
+            Pop-Location
+          }
+
+      - name: Generate compatible Assimp project
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Join-Path $env:IED_WORKSPACE 'assimp-source'
+          $build = Join-Path $env:IED_WORKSPACE 'assimp'
+
+          git clone --depth 1 --branch v5.2.5 https://github.com/assimp/assimp.git $source
+          cmake -S $source -B $build -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_CONFIGURATION_TYPES="$env:IED_CONFIGURATION" `
+            -DASSIMP_BUILD_TESTS=OFF `
+            -DASSIMP_BUILD_ASSIMP_TOOLS=OFF `
+            -DASSIMP_BUILD_ZLIB=ON `
+            -DBUILD_SHARED_LIBS=OFF `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          if ($LASTEXITCODE -ne 0) { throw 'Assimp CMake generation failed.' }
+
+          Copy-Item -Path (Join-Path $source 'include\*') -Destination (Join-Path $build 'include') -Recurse -Force
+
+      - name: Prepare vcpkg dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vcpkg = Join-Path $env:RUNNER_TEMP 'vcpkg'
+          git clone https://github.com/microsoft/vcpkg.git $vcpkg
+          & (Join-Path $vcpkg 'bootstrap-vcpkg.bat') -disableMetrics
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed.' }
+
+          $tripletDir = Join-Path $vcpkg 'triplets\community'
+          $tripletPath = Join-Path $tripletDir "$env:VCPKG_TRIPLET.cmake"
+          @'
+          set(VCPKG_TARGET_ARCHITECTURE x64)
+          set(VCPKG_CRT_LINKAGE static)
+          set(VCPKG_LIBRARY_LINKAGE static)
+          '@ | Set-Content -LiteralPath $tripletPath -Encoding ASCII
+
+          & (Join-Path $vcpkg 'vcpkg.exe') install `
+            "directxtk:$env:VCPKG_TRIPLET" `
+            "jsoncpp:$env:VCPKG_TRIPLET" `
+            "boost-locale:$env:VCPKG_TRIPLET" `
+            "boost-serialization:$env:VCPKG_TRIPLET" `
+            "tbb:$env:VCPKG_TRIPLET"
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg dependency installation failed.' }
+
+          & (Join-Path $vcpkg 'vcpkg.exe') integrate install
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg MSBuild integration failed.' }
+
+          "VCPKG_ROOT=$vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Apply IEDSyncTogether patch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $patch = Join-Path $env:GITHUB_WORKSPACE 'integration\ied-dev\ied-sync-together.patch'
+          Push-Location $env:IED_SOURCE_ROOT
+          try {
+            git apply --check $patch
+            if ($LASTEXITCODE -ne 0) { throw 'IEDSyncTogether patch check failed.' }
+            git apply $patch
+            if ($LASTEXITCODE -ne 0) { throw 'IEDSyncTogether patch application failed.' }
+          } finally {
+            Pop-Location
+          }
+
+      - name: Build patched IED 1.7.4
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $solution = Join-Path $env:IED_SOURCE_ROOT 'ImmersiveEquipmentDisplays.sln'
+          $dummyGame = Join-Path $env:RUNNER_TEMP 'SkyrimSE'
+          New-Item -ItemType Directory -Force -Path (Join-Path $dummyGame 'Data\SKSE\Plugins') | Out-Null
+
+          msbuild $solution /m /t:ImmersiveEquipmentDisplays `
+            "/p:Configuration=$env:IED_CONFIGURATION" `
+            /p:Platform=x64 `
+            "/p:VcpkgTriplet=$env:VCPKG_TRIPLET" `
+            "/p:SSEPath=$dummyGame" `
+            "/p:SSE_AE_PATH=$dummyGame" `
+            "/p:AE_CURRENT_PATH=$dummyGame" `
+            "/p:ENDERAL_SE_PATH=$dummyGame"
+          if ($LASTEXITCODE -ne 0) { throw 'Patched IED build failed.' }
+
+          $dll = Get-ChildItem -Path $env:IED_WORKSPACE -Recurse -Filter 'ImmersiveEquipmentDisplays.dll' -File |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $dll) { throw 'ImmersiveEquipmentDisplays.dll not found after build.' }
+
+          $outDir = Join-Path $env:GITHUB_WORKSPACE 'third-party\IED-1.7.4'
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+          $out = Join-Path $outDir 'ImmersiveEquipmentDisplays.dll'
+          Copy-Item -LiteralPath $dll.FullName -Destination $out -Force
+          Get-FileHash -Algorithm SHA256 -LiteralPath $out | Format-List | Out-Host
+
+      - name: Upload patched DLL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImmersiveEquipmentDisplays-1.7.4-IEDSyncTogether-0.10.0
+          path: third-party/IED-1.7.4/ImmersiveEquipmentDisplays.dll
+          if-no-files-found: error
+
+      - name: Commit reproducible prebuilt DLL to test branch
+        if: github.ref == 'refs/heads/feature/proxy-ied-isolation'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git config user.name 'github-actions[bot]'
+          git add -- third-party/IED-1.7.4/ImmersiveEquipmentDisplays.dll
+          if (git diff --cached --quiet) {
+            Write-Host 'Prebuilt patched IED DLL is already current.'
+            exit 0
+          }
+          git commit -m 'Update prebuilt patched IED 1.7.4 DLL for proxy isolation'
+          git push origin HEAD:feature/proxy-ied-isolation
