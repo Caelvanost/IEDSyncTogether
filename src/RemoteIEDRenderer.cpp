@@ -170,38 +170,42 @@ namespace IEDSyncTogether
             return value ? std::optional<RE::FormID>(value) : std::nullopt;
         }
 
-        RE::NiAVObject* FindRemoteIEDObject(
+        struct SceneIEDObject
+        {
+            RE::NiAVObject* object{ nullptr };
+            RE::FormID formID{ 0 };
+            std::string parentName;
+            std::string objectName;
+        };
+
+        void CollectIEDSceneObjects(
             RE::NiAVObject* current,
-            RE::FormID remoteFormID,
-            std::string_view expectedAttachment)
+            std::vector<SceneIEDObject>& out)
         {
             if (!current) {
-                return nullptr;
+                return;
             }
 
             const auto* rawName = current->name.c_str();
             const std::string_view name = rawName ? std::string_view(rawName) : std::string_view{};
-            if (auto formID = ParseIEDObjectFormID(name); formID && *formID == remoteFormID) {
+            if (const auto formID = ParseIEDObjectFormID(name)) {
                 const auto* parentRaw = current->parent && current->parent->name.c_str() ?
                     current->parent->name.c_str() : nullptr;
-                const std::string_view parentName = parentRaw ?
-                    std::string_view(parentRaw) : std::string_view{};
-                if (parentName == expectedAttachment) {
-                    return current;
-                }
+                out.push_back(SceneIEDObject{
+                    current,
+                    *formID,
+                    parentRaw ? std::string(parentRaw) : std::string{},
+                    std::string(name)
+                });
             }
 
             if (auto* node = current->AsNode()) {
                 for (const auto& child : node->GetChildren()) {
                     if (child) {
-                        if (auto* found = FindRemoteIEDObject(
-                                child.get(), remoteFormID, expectedAttachment)) {
-                            return found;
-                        }
+                        CollectIEDSceneObjects(child.get(), out);
                     }
                 }
             }
-            return nullptr;
         }
 
         float MaxMatrixDelta(
@@ -227,6 +231,16 @@ namespace IEDSyncTogether
                 std::abs(point.y - expected[1]),
                 std::abs(point.z - expected[2])
             });
+        }
+
+        float MatchScore(
+            const RE::NiAVObject& object,
+            const CapturedIEDObject& expected)
+        {
+            const auto rotationDelta = MaxMatrixDelta(object.local.rotate, expected.rotationMatrix);
+            const auto positionDelta = MaxPositionDelta(object.local.translate, expected.position);
+            const auto scaleDelta = std::abs(object.local.scale - expected.scale);
+            return rotationDelta * 1000.0f + positionDelta + scaleDelta * 100.0f;
         }
 
         void ApplyRawTransform(RE::NiAVObject* object, const CapturedIEDObject& captured)
@@ -355,7 +369,7 @@ namespace IEDSyncTogether
                 WatchdogLoop(stopToken);
             });
         SKSE::log::info(
-            "REMOTE IED transform watchdog started: interval={}ms",
+            "REMOTE IED transform/isolation watchdog started: interval={}ms",
             kWatchdogInterval.count());
     }
 
@@ -399,14 +413,55 @@ namespace IEDSyncTogether
                 continue;
             }
 
+            std::erase_if(
+                proxyState.suppressedNodes,
+                [](const RE::NiPointer<RE::NiAVObject>& object) {
+                    return !object || !object->parent;
+                });
+
+            std::vector<SceneIEDObject> sceneObjects;
+            CollectIEDSceneObjects(root, sceneObjects);
+            std::vector<bool> assigned(sceneObjects.size(), false);
+
+            const auto forgetSuppressed = [&proxyState](RE::NiAVObject* object) {
+                std::erase_if(
+                    proxyState.suppressedNodes,
+                    [object](const RE::NiPointer<RE::NiAVObject>& suppressed) {
+                        return !suppressed || suppressed.get() == object || !suppressed->parent;
+                    });
+            };
+
             for (auto& tracked : proxyState.objects) {
-                auto* remoteObject = FindRemoteIEDObject(
-                    root,
-                    tracked.remoteFormID,
-                    tracked.expectedAttachment);
-                if (!remoteObject) {
+                std::size_t bestIndex = sceneObjects.size();
+                float bestScore = std::numeric_limits<float>::max();
+
+                for (std::size_t index = 0; index < sceneObjects.size(); ++index) {
+                    if (assigned[index]) {
+                        continue;
+                    }
+
+                    const auto& candidate = sceneObjects[index];
+                    if (!candidate.object ||
+                        candidate.formID != tracked.remoteFormID ||
+                        candidate.parentName != tracked.expectedAttachment) {
+                        continue;
+                    }
+
+                    const auto score = MatchScore(*candidate.object, tracked.object);
+                    if (score < bestScore) {
+                        bestScore = score;
+                        bestIndex = index;
+                    }
+                }
+
+                if (bestIndex == sceneObjects.size()) {
                     continue;
                 }
+
+                assigned[bestIndex] = true;
+                auto* remoteObject = sceneObjects[bestIndex].object;
+                forgetSuppressed(remoteObject);
+                remoteObject->SetAppCulled(false);
 
                 const auto rotationDelta = MaxMatrixDelta(
                     remoteObject->local.rotate,
@@ -482,6 +537,39 @@ namespace IEDSyncTogether
                         scaleDelta);
                 }
             }
+
+            for (std::size_t index = 0; index < sceneObjects.size(); ++index) {
+                if (assigned[index]) {
+                    continue;
+                }
+
+                auto* object = sceneObjects[index].object;
+                if (!object) {
+                    continue;
+                }
+
+                const bool alreadySuppressed = std::ranges::any_of(
+                    proxyState.suppressedNodes,
+                    [object](const RE::NiPointer<RE::NiAVObject>& suppressed) {
+                        return suppressed && suppressed.get() == object;
+                    });
+
+                if (!alreadySuppressed && !object->GetAppCulled()) {
+                    proxyState.suppressedNodes.emplace_back(object);
+                    SKSE::log::info(
+                        "REMOTE IED ISOLATION suppressed: connection={} name=\"{}\" proxy={:08X} remoteForm={:08X} parent=\"{}\" object=\"{}\" reason=not-in-authoritative-remote-state",
+                        proxyState.connectionID,
+                        proxyState.displayName,
+                        proxyFormID,
+                        sceneObjects[index].formID,
+                        sceneObjects[index].parentName,
+                        sceneObjects[index].objectName);
+                }
+
+                if (alreadySuppressed || !object->GetAppCulled()) {
+                    object->SetAppCulled(true);
+                }
+            }
         }
     }
 
@@ -527,6 +615,11 @@ namespace IEDSyncTogether
             }
         }
 
+        std::vector<RE::NiPointer<RE::NiAVObject>> suppressedNodes;
+        if (auto existing = _trackedProxies.find(proxyFormID); existing != _trackedProxies.end()) {
+            suppressedNodes = std::move(existing->second.suppressedNodes);
+        }
+
         bool dispatched = true;
         dispatched &= DispatchNoResult(
             "RemoveActorBlock",
@@ -540,6 +633,7 @@ namespace IEDSyncTogether
         TrackedProxyState trackedProxy;
         trackedProxy.connectionID = connectionID;
         trackedProxy.displayName = std::string(displayName);
+        trackedProxy.suppressedNodes = std::move(suppressedNodes);
 
         std::size_t renderedSlots = 0;
         for (std::size_t slot = 0; slot < visibleSlots.size(); ++slot) {
@@ -675,7 +769,7 @@ namespace IEDSyncTogether
         }
 
         SKSE::log::info(
-            "REMOTE IED RENDER queued: connection={} name=\"{}\" proxy={:08X} visibleSlots={} customRendered={} trackedTransforms={} dispatchAccepted={} watchdogIntervalMs={}",
+            "REMOTE IED RENDER queued: connection={} name=\"{}\" proxy={:08X} visibleSlots={} customRendered={} trackedTransforms={} dispatchAccepted={} watchdogIntervalMs={} npcDisplayIsolation=1",
             connectionID,
             displayName,
             proxyFormID,
@@ -693,6 +787,14 @@ namespace IEDSyncTogether
             return;
         }
 
+        if (const auto tracked = _trackedProxies.find(proxyFormID); tracked != _trackedProxies.end()) {
+            for (const auto& suppressed : tracked->second.suppressedNodes) {
+                if (suppressed && suppressed->parent) {
+                    suppressed->SetAppCulled(false);
+                }
+            }
+        }
+
         _trackedProxies.erase(proxyFormID);
         _appliedSignatures.erase(proxyFormID);
 
@@ -700,7 +802,7 @@ namespace IEDSyncTogether
         auto* actor = form ? form->As<RE::Actor>() : nullptr;
         if (actor && actor != RE::PlayerCharacter::GetSingleton()) {
             ClearOwnedItems(actor);
-            SKSE::log::info("REMOTE IED RENDER cleared: proxy={:08X}", proxyFormID);
+            SKSE::log::info("REMOTE IED RENDER cleared: proxy={:08X} suppressedNodesRestored=1", proxyFormID);
         }
     }
 
