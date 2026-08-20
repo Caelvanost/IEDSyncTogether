@@ -3,42 +3,6 @@
 
 namespace IEDSyncTogether
 {
-    namespace
-    {
-        constexpr RE::FormID kDynamicFormMask = 0xFF000000;
-
-        std::vector<RE::Actor*> CollectDynamicActorCandidates()
-        {
-            std::vector<RE::Actor*> result;
-            std::unordered_set<RE::FormID> seen;
-            auto* processLists = RE::ProcessLists::GetSingleton();
-            if (!processLists) {
-                return result;
-            }
-
-            auto scan = [&](const auto& handles) {
-                for (const auto& handle : handles) {
-                    const auto actorPointer = handle.get();
-                    auto* actor = actorPointer.get();
-                    if (!IsDynamicActorCandidate(actor)) {
-                        continue;
-                    }
-
-                    const auto formID = actor->GetFormID();
-                    if (seen.insert(formID).second) {
-                        result.push_back(actor);
-                    }
-                }
-            };
-
-            scan(processLists->highActorHandles);
-            scan(processLists->middleHighActorHandles);
-            scan(processLists->middleLowActorHandles);
-            scan(processLists->lowActorHandles);
-            return result;
-        }
-    }
-
     bool EqualsInsensitive(std::string_view left, std::string_view right)
     {
         return left.size() == right.size() && std::equal(
@@ -51,13 +15,47 @@ namespace IEDSyncTogether
             });
     }
 
-    bool IsDynamicActorCandidate(RE::Actor* actor)
+    bool IsLikelyRemotePlayerProxy(RE::Actor* actor)
     {
         if (!actor || actor->IsPlayerRef()) {
             return false;
         }
 
-        return (actor->GetFormID() & kDynamicFormMask) == kDynamicFormMask;
+        auto* base = actor->GetActorBase();
+        if (!base) {
+            return false;
+        }
+
+        constexpr RE::FormID dynamicMask = 0xFF000000;
+        return (actor->GetFormID() & dynamicMask) == dynamicMask &&
+               (base->GetFormID() & dynamicMask) == dynamicMask;
+    }
+
+    std::vector<RE::Actor*> FindRemotePlayerProxies()
+    {
+        std::vector<RE::Actor*> result;
+        std::unordered_set<RE::FormID> seen;
+        auto* processLists = RE::ProcessLists::GetSingleton();
+        if (!processLists) {
+            return result;
+        }
+
+        auto scan = [&](const auto& handles) {
+            for (const auto& handle : handles) {
+                const auto actorPointer = handle.get();
+                auto* actor = actorPointer.get();
+                if (IsLikelyRemotePlayerProxy(actor) &&
+                    seen.insert(actor->GetFormID()).second) {
+                    result.push_back(actor);
+                }
+            }
+        };
+
+        scan(processLists->highActorHandles);
+        scan(processLists->middleHighActorHandles);
+        scan(processLists->middleLowActorHandles);
+        scan(processLists->lowActorHandles);
+        return result;
     }
 
     RE::Actor* FindRemotePlayerProxy(std::string_view playerName)
@@ -70,9 +68,9 @@ namespace IEDSyncTogether
         RE::Actor* best = nullptr;
         float bestDistance = std::numeric_limits<float>::max();
 
-        for (auto* actor : CollectDynamicActorCandidates()) {
+        for (auto* actor : FindRemotePlayerProxies()) {
             const auto* name = actor->GetName();
-            if (!name || !*name || !EqualsInsensitive(name, playerName)) {
+            if (!name || !EqualsInsensitive(name, playerName)) {
                 continue;
             }
 
@@ -83,23 +81,6 @@ namespace IEDSyncTogether
                 bestDistance = distance;
             }
         }
-
         return best;
-    }
-
-    std::vector<RE::Actor*> FindRemotePlayerProxies(
-        const std::vector<std::string>& playerNames)
-    {
-        std::vector<RE::Actor*> result;
-        std::unordered_set<RE::FormID> seen;
-
-        for (const auto& playerName : playerNames) {
-            auto* actor = FindRemotePlayerProxy(playerName);
-            if (actor && seen.insert(actor->GetFormID()).second) {
-                result.push_back(actor);
-            }
-        }
-
-        return result;
     }
 }

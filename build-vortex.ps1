@@ -7,17 +7,9 @@ $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BuildRoot = Join-Path $ProjectRoot "build"
-$PackageRoot = Join-Path $ProjectRoot "package"
+$PackageRoot = Join-Path $BuildRoot "package"
 $PluginRoot = Join-Path $PackageRoot "Data\SKSE\Plugins"
-$ConfigSource = Join-Path $ProjectRoot "config\IEDSyncTogether.ini"
-$CMakeLists = Join-Path $ProjectRoot "CMakeLists.txt"
-
-$CMakeText = Get-Content -LiteralPath $CMakeLists -Raw
-$VersionMatch = [regex]::Match($CMakeText, 'VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)')
-if (-not $VersionMatch.Success) {
-    throw "Impossible de determiner la version du projet depuis CMakeLists.txt"
-}
-$ProjectVersion = $VersionMatch.Groups[1].Value
+$DistRoot = Join-Path $ProjectRoot "dist"
 
 if (-not $VcpkgRoot) {
     $VcpkgRoot = "C:\dev\vcpkg"
@@ -28,12 +20,12 @@ if (-not (Test-Path -LiteralPath $Toolchain)) {
     throw "Toolchain vcpkg introuvable: $Toolchain"
 }
 
-Write-Host "Nettoyage des dossiers build et package..." -ForegroundColor Cyan
-foreach ($path in @($BuildRoot, $PackageRoot)) {
-    if (Test-Path -LiteralPath $path) {
-        Remove-Item -LiteralPath $path -Recurse -Force
-    }
+$CMakeText = Get-Content -LiteralPath (Join-Path $ProjectRoot "CMakeLists.txt") -Raw
+$VersionMatch = [regex]::Match($CMakeText, 'VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)')
+if (-not $VersionMatch.Success) {
+    throw "Impossible de lire la VERSION depuis CMakeLists.txt"
 }
+$ProjectVersion = $VersionMatch.Groups[1].Value
 
 function Write-Subrecord {
     param(
@@ -41,7 +33,6 @@ function Write-Subrecord {
         [string]$Signature,
         [byte[]]$Data
     )
-
     $Writer.Write([System.Text.Encoding]::ASCII.GetBytes($Signature))
     $Writer.Write([uint16]$Data.Length)
     $Writer.Write($Data)
@@ -66,7 +57,7 @@ function Write-MinimalPlugin {
         }
 
         Write-Subrecord $dataWriter "CNAM" ([System.Text.Encoding]::UTF8.GetBytes("Caelvanost`0"))
-        Write-Subrecord $dataWriter "SNAM" ([System.Text.Encoding]::UTF8.GetBytes("IEDSyncTogether runtime marker`0"))
+        Write-Subrecord $dataWriter "SNAM" ([System.Text.Encoding]::UTF8.GetBytes("IEDSyncTogether STRPM state transport marker`0"))
 
         $file = [System.IO.File]::Open($Path, [System.IO.FileMode]::Create)
         $writer = [System.IO.BinaryWriter]::new($file)
@@ -91,9 +82,7 @@ function Write-MinimalPlugin {
 }
 
 & cmake -S $ProjectRoot -B $BuildRoot "-DCMAKE_TOOLCHAIN_FILE=$Toolchain"
-if ($LASTEXITCODE -ne 0) {
-    throw "La configuration CMake a echoue."
-}
+if ($LASTEXITCODE -ne 0) { throw "La configuration CMake a echoue." }
 
 $GeneratedPlugin = Join-Path $BuildRoot "__IEDSyncTogetherPlugin.cpp"
 if (Test-Path -LiteralPath $GeneratedPlugin) {
@@ -105,24 +94,20 @@ if (Test-Path -LiteralPath $GeneratedPlugin) {
 }
 
 & cmake --build $BuildRoot --config $Configuration
-if ($LASTEXITCODE -ne 0) {
-    throw "La compilation a echoue."
-}
+if ($LASTEXITCODE -ne 0) { throw "La compilation a echoue." }
 
-$dll = Get-ChildItem -LiteralPath $BuildRoot -Recurse -Filter "IEDSyncTogether.dll" -File |
+$dll = Get-ChildItem -LiteralPath $BuildRoot -Recurse -Filter "IEDSyncTogether.dll" |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
-if (-not $dll) {
-    throw "IEDSyncTogether.dll est introuvable apres compilation."
+if (-not $dll) { throw "IEDSyncTogether.dll est introuvable apres compilation." }
+
+if (Test-Path -LiteralPath $PackageRoot) {
+    Remove-Item -LiteralPath $PackageRoot -Recurse -Force
 }
+New-Item -ItemType Directory -Force -Path $PluginRoot, $DistRoot | Out-Null
 
-New-Item -ItemType Directory -Force -Path $PluginRoot | Out-Null
 Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $PluginRoot "IEDSyncTogether.dll") -Force
-Copy-Item -LiteralPath $ConfigSource -Destination (Join-Path $PluginRoot "IEDSyncTogether.ini") -Force
 Write-MinimalPlugin (Join-Path $PackageRoot "Data\IEDSyncTogether.esp")
-
-$DistRoot = Join-Path $ProjectRoot "dist"
-New-Item -ItemType Directory -Force -Path $DistRoot | Out-Null
 
 $Archive = Join-Path $DistRoot "IEDSyncTogether-v$ProjectVersion.zip"
 if (Test-Path -LiteralPath $Archive) {
@@ -130,28 +115,4 @@ if (Test-Path -LiteralPath $Archive) {
 }
 Compress-Archive -Path (Join-Path $PackageRoot "*") -DestinationPath $Archive -Force
 
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-$zip = [System.IO.Compression.ZipFile]::OpenRead($Archive)
-try {
-    $entries = @($zip.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
-    foreach ($required in @(
-        "Data/SKSE/Plugins/IEDSyncTogether.dll",
-        "Data/SKSE/Plugins/IEDSyncTogether.ini",
-        "Data/IEDSyncTogether.esp"
-    )) {
-        if ($entries -notcontains $required) {
-            throw "Entree absente de l'archive: $required"
-        }
-    }
-
-    if ($entries -contains "Data/SKSE/Plugins/ImmersiveEquipmentDisplays.dll") {
-        throw "Le package ne doit pas contenir ImmersiveEquipmentDisplays.dll: le hook utilise le DLL IED 1.7.4 officiel installe separement."
-    }
-} finally {
-    $zip.Dispose()
-}
-
-Write-Host ""
-Write-Host "Package Vortex cree:" -ForegroundColor Green
-Write-Host $Archive
-Write-Host "IED 1.7.4 officiel reste une dependance separee; aucun DLL IED modifie n'est inclus." -ForegroundColor Green
+Write-Host "Package cree: $Archive" -ForegroundColor Green

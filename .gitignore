@@ -1,5 +1,5 @@
-build/
-package/
+/build/
+/package/
 *.zip
 *.7z
 *.rar
@@ -7,5 +7,3 @@ package/
 .vs/
 .vscode/
 CMakeUserPresets.json
-
-dist/

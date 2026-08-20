@@ -4,6 +4,7 @@
 #include "IEDBridge.h"
 #include "IEDSyncTogether/Interface.h"
 #include "ProxyResolver.h"
+#include "StrTransport.h"
 #include "UdpTransport.h"
 
 namespace IEDSyncTogether
@@ -11,6 +12,20 @@ namespace IEDSyncTogether
     namespace
     {
         constexpr std::string_view kGameplayPrefix = "IEDST|v1|";
+
+        const char* TransportModeName(Config::TransportMode mode)
+        {
+            switch (mode) {
+            case Config::TransportMode::kSTR:
+                return "STR";
+            case Config::TransportMode::kAuto:
+                return "Auto";
+            case Config::TransportMode::kUDP:
+                return "UDP";
+            default:
+                return "Unknown";
+            }
+        }
     }
 
     SyncService& SyncService::GetSingleton()
@@ -47,12 +62,6 @@ namespace IEDSyncTogether
             return;
         }
 
-        _gameLoaded.store(false);
-        _strConnected.store(false);
-        _remotePlayersAvailable.store(false);
-        _capturePending.store(false);
-        _lastReadySend = {};
-        ClearKnownPeers();
         _config = Config::Load();
         if (!IEDBridge::GetSingleton().IsInstalled()) {
             SKSE::log::critical("Immersive Equipment Displays is not loaded");
@@ -60,30 +69,46 @@ namespace IEDSyncTogether
             return;
         }
 
-        if (_config.networkEnabled) {
-            UdpTransport::GetSingleton().Start(
-                _config,
-                [](std::string packet) {
-                    if (auto* tasks = SKSE::GetTaskInterface()) {
-                        tasks->AddTask([packet = std::move(packet)]() mutable {
-                            SyncService::GetSingleton().HandlePacket(std::move(packet));
-                        });
-                    }
+        const auto packetHandler = [](std::string packet) {
+            if (auto* tasks = SKSE::GetTaskInterface()) {
+                tasks->AddTask([packet = std::move(packet)]() mutable {
+                    SyncService::GetSingleton().HandlePacket(std::move(packet));
                 });
+            }
+        };
+
+        bool networkStarted = false;
+        if (_config.networkEnabled &&
+            _config.transportMode != Config::TransportMode::kUDP) {
+            networkStarted = StrTransport::GetSingleton().Start(_config, packetHandler);
+        }
+
+        const bool wantsUdp =
+            _config.transportMode == Config::TransportMode::kUDP ||
+            (_config.transportMode == Config::TransportMode::kAuto && !networkStarted) ||
+            (_config.udpFallback && !networkStarted);
+        if (_config.networkEnabled && wantsUdp) {
+            networkStarted = UdpTransport::GetSingleton().Start(_config, packetHandler);
+        }
+
+        if (_config.networkEnabled && !networkStarted) {
+            SKSE::log::warn(
+                "No network transport started for mode={} udpFallback={}",
+                TransportModeName(_config.transportMode),
+                _config.udpFallback ? 1 : 0);
         }
 
         _timer = std::jthread([this](std::stop_token token) { TimerLoop(token); });
         SKSE::log::info(
-            "Service started dormant: LAN peer id is persistent for the session; STR proxy FormIDs are treated as ephemeral; capture={}ms suppressRemoteNpcDisplays={}",
+            "Service started: peer identity uses transport instance id; proxy FormIDs are ephemeral; capture={}ms suppressRemoteNpcDisplays={} transport={} udpFallback={}",
             _config.captureIntervalMs,
-            _config.suppressRemoteNpcDisplays ? 1 : 0);
+            _config.suppressRemoteNpcDisplays ? 1 : 0,
+            TransportModeName(_config.transportMode),
+            _config.udpFallback ? 1 : 0);
     }
 
     void SyncService::Stop()
     {
-        _gameLoaded.store(false);
-        SuspendSTRSession();
-        ClearKnownPeers();
         if (!_running.exchange(false)) {
             return;
         }
@@ -91,99 +116,31 @@ namespace IEDSyncTogether
             _timer.request_stop();
             _timer.join();
         }
+        StrTransport::GetSingleton().Stop();
         UdpTransport::GetSingleton().Stop();
     }
 
     void SyncService::Reset()
     {
-        _gameLoaded.store(false);
-        SuspendSTRSession();
-        ClearKnownPeers();
-    }
-
-    void SyncService::SetGameLoaded(bool loaded) noexcept
-    {
-        _gameLoaded.store(loaded);
-        if (!loaded) {
-            SuspendSTRSession();
-            ClearKnownPeers();
-            SKSE::log::info("Game unloaded; LAN/IED synchronization suspended");
-            return;
+        for (const auto formID : _blockedProxies) {
+            if (auto* form = RE::TESForm::LookupByID(formID)) {
+                if (auto* actor = form->As<RE::Actor>()) {
+                    IEDBridge::GetSingleton().SetActorBlocked(actor, false);
+                }
+            }
         }
-
-        _lastReadySend = {};
-        SKSE::log::info(
-            "Game loaded; waiting for LAN peers and matching dynamic STR proxies");
-    }
-
-    void SyncService::SuspendSTRSession()
-    {
-        _strConnected.store(false);
-        _remotePlayersAvailable.store(false);
-        _capturePending.store(false);
         _blockedProxies.clear();
         {
             std::scoped_lock lock(_snapshotMutex);
             _remoteSnapshots.clear();
         }
-        _localSlots = {};
         _hasLocalSlots = false;
-        _lastSend = {};
-    }
-
-    void SyncService::UpdateSTRSessionState(const std::vector<PeerBinding>& bindings)
-    {
-        const auto boundCount = static_cast<std::size_t>(std::count_if(
-            bindings.begin(),
-            bindings.end(),
-            [](const auto& binding) { return binding.proxyFormID != 0; }));
-
-        const bool hasRemotePlayers = boundCount != 0;
-        _remotePlayersAvailable.store(hasRemotePlayers);
-
-        const bool wasConnected = _strConnected.exchange(hasRemotePlayers);
-        if (hasRemotePlayers == wasConnected) {
-            return;
-        }
-
-        if (hasRemotePlayers) {
-            _capturePending.store(false);
-            _hasLocalSlots = false;
-            _lastSend = {};
-            SKSE::log::info(
-                "LAN peer binding active: {} remote proxy/proxies currently resolved; enabling IED synchronization",
-                boundCount);
-        } else {
-            _capturePending.store(false);
-            SKSE::log::info(
-                "All remote proxies are temporarily unresolved; retaining LAN peer identities and remote snapshots");
-        }
-    }
-
-    bool SyncService::CanApplyRuntimeOverrides() const
-    {
-        if (!_running.load() ||
-            !_gameLoaded.load() ||
-            !_strConnected.load() ||
-            !_remotePlayersAvailable.load()) {
-            return false;
-        }
-
-        std::scoped_lock lock(_snapshotMutex);
-        return std::any_of(
-            _remoteSnapshots.begin(),
-            _remoteSnapshots.end(),
-            [](const auto& entry) { return entry.second.lastProxy != 0; });
+        _capturePending.store(false);
     }
 
     void SyncService::TimerLoop(std::stop_token token)
     {
         while (!token.stop_requested() && _running.load()) {
-            if (!_gameLoaded.load()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                continue;
-            }
-
             if (auto* tasks = SKSE::GetTaskInterface()) {
                 tasks->AddTask([]() { SyncService::GetSingleton().Tick(); });
             }
@@ -198,189 +155,13 @@ namespace IEDSyncTogether
         }
     }
 
-    void SyncService::SendReadyHeartbeat()
-    {
-        if (!_config.networkEnabled) {
-            return;
-        }
-
-        auto& transport = UdpTransport::GetSingleton();
-        if (!transport.IsRunning()) {
-            return;
-        }
-
-        const auto now = std::chrono::steady_clock::now();
-        const auto interval = std::chrono::milliseconds(
-            std::max<std::uint32_t>(_config.discoveryIntervalMs, 500));
-        if (_lastReadySend != std::chrono::steady_clock::time_point{} &&
-            now - _lastReadySend < interval) {
-            return;
-        }
-
-        const auto playerName = transport.GetLocalPlayerName();
-        transport.Send(fmt::format(
-            "READY|from={}",
-            HexEncode(playerName)));
-        _lastReadySend = now;
-    }
-
-    void SyncService::HandleReadyPacket(std::string_view packet)
-    {
-        const auto instanceID = ReadField(packet, "id");
-        const auto encodedName = ReadField(packet, "from");
-        const auto playerName = encodedName ? HexDecode(*encodedName) : std::nullopt;
-        if (!instanceID || !playerName || playerName->empty()) {
-            return;
-        }
-
-        bool firstSeen = false;
-        bool characterChanged = false;
-        {
-            std::scoped_lock lock(_peerStateMutex);
-            auto& peer = _knownPeers[*instanceID];
-            firstSeen = peer.name.empty();
-            characterChanged = !peer.name.empty() && peer.name != *playerName;
-            if (peer.name != *playerName) {
-                peer.name = *playerName;
-                peer.currentProxy = 0;
-            }
-            peer.lastSeen = std::chrono::steady_clock::now();
-        }
-
-        if (characterChanged) {
-            std::scoped_lock lock(_snapshotMutex);
-            _remoteSnapshots.erase(*instanceID);
-        }
-
-        if (firstSeen || characterChanged) {
-            SKSE::log::info(
-                "LAN peer ready: id={} character=\"{}\"{}",
-                *instanceID,
-                *playerName,
-                characterChanged ? " (character changed; old snapshot discarded)" : "");
-        }
-    }
-
-    void SyncService::ExpireKnownPeers()
-    {
-        const auto now = std::chrono::steady_clock::now();
-        const auto timeout = std::chrono::milliseconds(_config.peerTimeoutMs);
-        std::vector<std::string> expired;
-
-        {
-            std::scoped_lock lock(_peerStateMutex);
-            for (auto iterator = _knownPeers.begin(); iterator != _knownPeers.end();) {
-                if (now - iterator->second.lastSeen > timeout) {
-                    expired.push_back(iterator->first);
-                    iterator = _knownPeers.erase(iterator);
-                } else {
-                    ++iterator;
-                }
-            }
-        }
-
-        if (!expired.empty()) {
-            std::scoped_lock lock(_snapshotMutex);
-            for (const auto& peerID : expired) {
-                _remoteSnapshots.erase(peerID);
-                SKSE::log::info("LAN peer expired: id={}; remote snapshot discarded", peerID);
-            }
-        }
-    }
-
-    void SyncService::ClearKnownPeers()
-    {
-        std::scoped_lock lock(_peerStateMutex);
-        _knownPeers.clear();
-    }
-
-    std::vector<SyncService::PeerBinding> SyncService::RefreshPeerBindings()
-    {
-        std::vector<PeerBinding> bindings;
-        {
-            std::scoped_lock lock(_peerStateMutex);
-            bindings.reserve(_knownPeers.size());
-            for (const auto& [peerID, peer] : _knownPeers) {
-                bindings.push_back(PeerBinding{
-                    .id = peerID,
-                    .name = peer.name,
-                    .proxyFormID = 0
-                });
-            }
-        }
-
-        std::unordered_set<RE::FormID> claimedProxies;
-        for (auto& binding : bindings) {
-            auto* proxy = binding.name.empty() ? nullptr : FindRemotePlayerProxy(binding.name);
-            binding.proxyFormID = proxy ? proxy->GetFormID() : 0;
-            if (binding.proxyFormID != 0 &&
-                !claimedProxies.insert(binding.proxyFormID).second) {
-                binding.proxyFormID = 0;
-            }
-
-            RE::FormID previousProxy = 0;
-            {
-                std::scoped_lock lock(_peerStateMutex);
-                const auto iterator = _knownPeers.find(binding.id);
-                if (iterator == _knownPeers.end()) {
-                    binding.proxyFormID = 0;
-                    continue;
-                }
-                previousProxy = iterator->second.currentProxy;
-                iterator->second.currentProxy = binding.proxyFormID;
-            }
-
-            if (previousProxy != binding.proxyFormID) {
-                if (previousProxy == 0 && binding.proxyFormID != 0) {
-                    SKSE::log::info(
-                        "LAN peer bound: id={} character=\"{}\" proxy={:08X}",
-                        binding.id,
-                        binding.name,
-                        binding.proxyFormID);
-                } else if (previousProxy != 0 && binding.proxyFormID == 0) {
-                    SKSE::log::info(
-                        "LAN peer proxy disappeared: id={} character=\"{}\" oldProxy={:08X}; retaining peer state",
-                        binding.id,
-                        binding.name,
-                        previousProxy);
-                } else {
-                    SKSE::log::info(
-                        "LAN peer rebound after proxy recreation: id={} character=\"{}\" {:08X}->{:08X}",
-                        binding.id,
-                        binding.name,
-                        previousProxy,
-                        binding.proxyFormID);
-                }
-            }
-
-            {
-                std::scoped_lock lock(_snapshotMutex);
-                if (const auto iterator = _remoteSnapshots.find(binding.id);
-                    iterator != _remoteSnapshots.end()) {
-                    iterator->second.lastProxy = binding.proxyFormID;
-                }
-            }
-        }
-
-        return bindings;
-    }
-
     void SyncService::Tick()
     {
-        if (!_running.load() || !_gameLoaded.load()) {
+        if (!_running.load()) {
             return;
         }
 
-        SendReadyHeartbeat();
-        ExpireKnownPeers();
-
-        const auto bindings = RefreshPeerBindings();
-        UpdateSTRSessionState(bindings);
-        RefreshProxyMitigation(bindings);
-
-        if (!_strConnected.load() || !_remotePlayersAvailable.load()) {
-            return;
-        }
+        RefreshProxyMitigation();
 
         bool expected = false;
         if (!_capturePending.compare_exchange_strong(expected, true)) {
@@ -390,14 +171,8 @@ namespace IEDSyncTogether
         const bool requested = IEDBridge::GetSingleton().CapturePlayerSlots(
             [this](SlotState slots) {
                 _capturePending.store(false);
-                if (!_gameLoaded.load() ||
-                    !_strConnected.load() ||
-                    !_remotePlayersAvailable.load()) {
-                    return;
-                }
                 OnLocalCapture(std::move(slots));
             });
-
         if (!requested) {
             _capturePending.store(false);
         }
@@ -405,13 +180,6 @@ namespace IEDSyncTogether
 
     void SyncService::OnLocalCapture(SlotState slots)
     {
-        if (!_running.load() ||
-            !_gameLoaded.load() ||
-            !_strConnected.load() ||
-            !_remotePlayersAvailable.load()) {
-            return;
-        }
-
         const auto now = std::chrono::steady_clock::now();
         const bool changed = !_hasLocalSlots || slots != _localSlots;
         const bool resendDue = !_hasLocalSlots ||
@@ -426,13 +194,11 @@ namespace IEDSyncTogether
             ++_revision;
         }
 
-        const auto& transport = UdpTransport::GetSingleton();
         const auto payload = fmt::format(
-            "STATE|from={}|rev={}|slots={}",
-            HexEncode(transport.GetLocalPlayerName()),
+            "STATE|rev={}|slots={}",
             _revision,
             EncodeSlots(_localSlots));
-        UdpTransport::GetSingleton().Send(payload);
+        SendNetworkPayload(payload);
         _lastSend = now;
 
         const auto visible = std::count_if(
@@ -446,18 +212,20 @@ namespace IEDSyncTogether
             changed ? 1 : 0);
     }
 
+    void SyncService::SendNetworkPayload(std::string_view payload)
+    {
+        if (StrTransport::GetSingleton().IsRunning()) {
+            StrTransport::GetSingleton().Send(payload);
+            return;
+        }
+        if (UdpTransport::GetSingleton().IsRunning()) {
+            UdpTransport::GetSingleton().Send(payload);
+        }
+    }
+
     void SyncService::HandlePacket(std::string packet)
     {
-        if (!_gameLoaded.load() || !packet.starts_with(kGameplayPrefix)) {
-            return;
-        }
-
-        if (packet.find("|READY|") != std::string::npos) {
-            HandleReadyPacket(packet);
-            return;
-        }
-
-        if (packet.find("|STATE|") == std::string::npos) {
+        if (!packet.starts_with(kGameplayPrefix) || packet.find("|STATE|") == std::string::npos) {
             return;
         }
 
@@ -465,7 +233,7 @@ namespace IEDSyncTogether
         const auto encodedSender = ReadField(packet, "from");
         const auto revisionText = ReadField(packet, "rev");
         const auto slotsText = ReadField(packet, "slots");
-        if (!instanceID || !encodedSender || !revisionText || !slotsText) {
+        if (!instanceID || instanceID->empty() || !encodedSender || !revisionText || !slotsText) {
             return;
         }
 
@@ -484,34 +252,28 @@ namespace IEDSyncTogether
         }
 
         RE::FormID currentProxy = 0;
-        bool characterChanged = false;
-        {
-            std::scoped_lock lock(_peerStateMutex);
-            auto& peer = _knownPeers[*instanceID];
-            characterChanged = !peer.name.empty() && peer.name != *sender;
-            if (peer.name != *sender) {
-                peer.name = *sender;
-                peer.currentProxy = 0;
-            }
-            peer.lastSeen = std::chrono::steady_clock::now();
-            currentProxy = peer.currentProxy;
+        if (auto* proxy = FindRemotePlayerProxy(*sender)) {
+            currentProxy = proxy->GetFormID();
         }
 
+        bool characterChanged = false;
         {
             std::scoped_lock lock(_snapshotMutex);
             auto& snapshot = _remoteSnapshots[*instanceID];
-            if (characterChanged || snapshot.characterName != *sender) {
+            characterChanged = !snapshot.characterName.empty() &&
+                               snapshot.characterName != *sender;
+            if (characterChanged) {
                 snapshot = RemoteSnapshot{};
-                snapshot.characterName = *sender;
             }
+            snapshot.characterName = *sender;
 
-            if (revision >= snapshot.revision) {
-                snapshot.slots = *slots;
-                snapshot.revision = revision;
-                snapshot.lastProxy = currentProxy;
-            } else {
+            if (revision < snapshot.revision) {
                 return;
             }
+
+            snapshot.slots = *slots;
+            snapshot.revision = revision;
+            snapshot.lastProxy = currentProxy;
         }
 
         const auto visible = std::count_if(
@@ -519,34 +281,76 @@ namespace IEDSyncTogether
             slots->end(),
             [](const auto& slot) { return slot.has_value(); });
         SKSE::log::info(
-            "Remote IED state stored: peer={} character=\"{}\" proxy={} revision={} slots={}; snapshot survives proxy recreation",
+            "Remote IED state stored: peer={} character=\"{}\" proxy={} revision={} slots={}{}",
             *instanceID,
             *sender,
             currentProxy ? fmt::format("{:08X}", currentProxy) : std::string("unresolved"),
             revision,
-            visible);
+            visible,
+            characterChanged ? " characterChanged=1" : "");
     }
 
-    void SyncService::RefreshProxyMitigation(const std::vector<PeerBinding>& bindings)
+    void SyncService::RefreshProxyMitigation()
     {
         std::unordered_set<RE::FormID> current;
-        for (const auto& binding : bindings) {
-            if (binding.proxyFormID == 0) {
+
+        {
+            std::scoped_lock lock(_snapshotMutex);
+            for (auto& [peerID, snapshot] : _remoteSnapshots) {
+                RE::FormID newProxy = 0;
+                if (!snapshot.characterName.empty()) {
+                    if (auto* proxy = FindRemotePlayerProxy(snapshot.characterName)) {
+                        newProxy = proxy->GetFormID();
+                    }
+                }
+
+                const auto previousProxy = snapshot.lastProxy;
+                snapshot.lastProxy = newProxy;
+                if (newProxy != 0) {
+                    current.insert(newProxy);
+                }
+
+                if (previousProxy == newProxy) {
+                    continue;
+                }
+
+                if (previousProxy == 0 && newProxy != 0) {
+                    SKSE::log::info(
+                        "Peer proxy bound: peer={} character=\"{}\" proxy={:08X}",
+                        peerID,
+                        snapshot.characterName,
+                        newProxy);
+                } else if (previousProxy != 0 && newProxy == 0) {
+                    SKSE::log::info(
+                        "Peer proxy disappeared: peer={} character=\"{}\" oldProxy={:08X}; retaining snapshot",
+                        peerID,
+                        snapshot.characterName,
+                        previousProxy);
+                } else {
+                    SKSE::log::info(
+                        "Peer proxy rebound: peer={} character=\"{}\" {:08X}->{:08X}",
+                        peerID,
+                        snapshot.characterName,
+                        previousProxy,
+                        newProxy);
+                }
+            }
+        }
+
+        for (const auto formID : current) {
+            if (!_config.suppressRemoteNpcDisplays ||
+                !_blockedProxies.insert(formID).second) {
                 continue;
             }
 
-            current.insert(binding.proxyFormID);
-            if (_config.suppressRemoteNpcDisplays &&
-                _blockedProxies.insert(binding.proxyFormID).second) {
-                auto* form = RE::TESForm::LookupByID(binding.proxyFormID);
-                auto* actor = form ? form->As<RE::Actor>() : nullptr;
-                if (actor) {
+            if (auto* form = RE::TESForm::LookupByID(formID)) {
+                if (auto* actor = form->As<RE::Actor>()) {
                     IEDBridge::GetSingleton().SetActorBlocked(actor, true);
+                    const auto* proxyName = actor->GetName();
                     SKSE::log::info(
-                        "Suppressed IED NPC display: peer={} character=\"{}\" proxy={:08X}",
-                        binding.id,
-                        binding.name,
-                        binding.proxyFormID);
+                        "Suppressed IED NPC display on reboundable proxy {:08X} \"{}\"",
+                        formID,
+                        proxyName ? proxyName : "");
                 }
             }
         }
@@ -571,38 +375,31 @@ namespace IEDSyncTogether
         RE::FormID& outFormID) const
     {
         outFormID = 0;
-        if (!_running.load() ||
-            !_gameLoaded.load() ||
-            !_strConnected.load() ||
-            !_remotePlayersAvailable.load() ||
-            slotIndex >= IEDST::kSlotCount) {
+        if (slotIndex >= IEDST::kSlotCount) {
             return static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kNotRemote);
         }
 
         auto* form = RE::TESForm::LookupByID(actorFormID);
         auto* actor = form ? form->As<RE::Actor>() : nullptr;
-        if (!IsDynamicActorCandidate(actor)) {
+        if (!IsLikelyRemotePlayerProxy(actor)) {
             return static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kNotRemote);
         }
 
         std::optional<FormIdentity> identity;
-        bool matched = false;
         {
             std::scoped_lock lock(_snapshotMutex);
-            for (const auto& [peerID, snapshot] : _remoteSnapshots) {
-                (void)peerID;
-                if (snapshot.lastProxy != actorFormID) {
-                    continue;
-                }
-                identity = snapshot.slots[slotIndex];
-                matched = true;
-                break;
+            const auto iterator = std::find_if(
+                _remoteSnapshots.begin(),
+                _remoteSnapshots.end(),
+                [actorFormID](const auto& entry) {
+                    return entry.second.lastProxy == actorFormID;
+                });
+            if (iterator == _remoteSnapshots.end()) {
+                return static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kNotRemote);
             }
+            identity = iterator->second.slots[slotIndex];
         }
 
-        if (!matched) {
-            return static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kNotRemote);
-        }
         if (!identity) {
             return static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kEmpty);
         }

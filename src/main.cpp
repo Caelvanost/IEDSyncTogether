@@ -1,7 +1,9 @@
 #include "PCH.h"
 
 #include "IEDSyncTogether/Interface.h"
-#include "SyncService.h"
+#include "LocalCaptureProbe.h"
+#include "RemoteIEDRenderer.h"
+#include "STRPMAdapter.h"
 
 namespace
 {
@@ -24,26 +26,28 @@ namespace
     void OnSKSEMessage(SKSE::MessagingInterface::Message* message)
     {
         using namespace IEDSyncTogether;
-        auto& service = SyncService::GetSingleton();
-
         switch (message->type) {
         case SKSE::MessagingInterface::kDataLoaded:
-            // Do not patch IED while Skyrim is starting or loading a save.
-            // The runtime hook is installed lazily only after a LAN peer has
-            // been matched to a dynamic remote-player actor.
-            service.Start();
-            break;
+        {
+            RemoteIEDRenderer::GetSingleton().Start();
 
+            auto& adapter = STRPMAdapter::GetSingleton();
+            const bool transportReady = adapter.Start();
+            auto& capture = LocalCaptureProbe::GetSingleton();
+            capture.SetStateChangedHandler(
+                [](const LocalIEDState& state, std::string_view payload) {
+                    STRPMAdapter::GetSingleton().Publish(state, payload);
+                });
+            capture.Start();
+            SKSE::log::info(
+                "STRPM branch mode: local capture + STRPM transport + ProxyResolver + raw-scenegraph slot/custom renderer + transform watchdog; transportReady={}",
+                transportReady ? 1 : 0);
+            break;
+        }
         case SKSE::MessagingInterface::kPreLoadGame:
-            service.SetGameLoaded(false);
-            service.Reset();
+            STRPMAdapter::GetSingleton().Reset();
+            LocalCaptureProbe::GetSingleton().Reset();
             break;
-
-        case SKSE::MessagingInterface::kPostLoadGame:
-        case SKSE::MessagingInterface::kNewGame:
-            service.SetGameLoaded(true);
-            break;
-
         default:
             break;
         }
@@ -71,19 +75,12 @@ extern "C" std::uint32_t IEDST_GetInterfaceVersion() noexcept
 }
 
 extern "C" std::uint32_t IEDST_QuerySlotOverride(
-    std::uint32_t actorFormID,
-    std::uint32_t slotIndex,
+    std::uint32_t,
+    std::uint32_t,
     std::uint32_t* outFormID) noexcept
 {
-    if (!outFormID) {
-        return static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kNotRemote);
+    if (outFormID) {
+        *outFormID = 0;
     }
-
-    RE::FormID resolved = 0;
-    const auto result = IEDSyncTogether::SyncService::GetSingleton().QueryRemoteSlot(
-        actorFormID,
-        slotIndex,
-        resolved);
-    *outFormID = resolved;
-    return result;
+    return static_cast<std::uint32_t>(IEDST::SlotOverrideResult::kNotRemote);
 }

@@ -1,179 +1,247 @@
 # IEDSyncTogether
 
-Compatibility and synchronization layer between
-[Immersive Equipment Displays](https://www.nexusmods.com/skyrimspecialedition/mods/62001)
-and Skyrim Together Reborn.
+Compatibility layer between Immersive Equipment Displays (IED) and Skyrim Together Reborn.
 
-## Problem
+## v0.9.0 — persistent raw-transform watchdog + Custom Item rendering
 
-Skyrim Together represents remote players as dynamically created `Actor`
-proxies. IED therefore applies its NPC rules to them. In particular, the
-player-only favorite check is not applied, which can make every compatible
-item in the remote inventory appear on the proxy.
+The `strpm` branch now reproduces both standard IED slot displays and captured IED Custom Items on the correct remote STR proxy.
 
-## Intended behavior
+```text
+local evaluated IED state
+        ↓
+slots + custom objects
+        ↓
+plugin/local FormID + attachment mode + exact local transform
+        ↓
+LocalIEDState / STRPM
+        ↓
+STRPM ProxyResolver
+        ↓
+remote STR proxy
+        ↓
+IED creates/attaches IEDSyncTogether-owned Custom Items
+        ↓
+IEDSyncTogether watchdog maintains exact NiAVObject::local transforms
+```
 
-- Detect only Skyrim Together remote-player proxies.
-- Remain dormant after loading a save until a remote STR player proxy actually appears.
-- Capture the 19 forms actually selected by IED on the owning client only while an STR session with a remote player is active.
-- Exchange stable `plugin + local FormID` identities over the LAN.
-- Reproduce that authoritative selection on the matching remote proxy.
-- Suspend capture and clear remote overrides when STR remote-player proxies disappear.
-- Never alter the real inventory or equipment managed by Skyrim Together.
+### Requirements
 
-## Status
-
-The v0.1 prototype provides:
-
-- Skyrim Together remote-proxy detection.
-- STR-session-gated synchronization: `PostLoadGame` alone never starts IED capture.
-- Asynchronous capture of all 19 IED equipment slots after a remote STR proxy appears.
-- LAN peer discovery and UDP state exchange.
-- Stable cross-client form identities (`plugin + local FormID`).
-- An authoritative remote-slot query in IEDSyncTogether.
-- A runtime hook for the official IED 1.7.4 DLL at the slot-selection boundary.
-- Strict byte-signature checks so unsupported IED builds are rejected instead of patched blindly.
-- An opt-in fallback that hides IED-cloned gear on remote proxies.
-
-It is built for:
-
-- Skyrim Special Edition 1.6.1170
-- SKSE 2.2.6
-- Immersive Equipment Displays 1.7.4
 - Skyrim Together Reborn 1.8.0
+- Immersive Equipment Displays
+- STRPluginMessagingAPI v0.8.2 or newer compatible build with ProxyResolver available
+- the relay/server files required by that STRPM build
 
-## Synchronization lifecycle
+For renderer testing, disable IED **NPC Displays** on both clients so remote displays visible in game are created by IEDSyncTogether rather than IED's normal NPC display path.
 
-Loading a Skyrim save is deliberately separate from joining Skyrim Together:
+## Local capture
 
-```text
-DataLoaded
-    -> install IED runtime hook
-    -> start service in dormant mode
+The authoritative local capture records:
 
-PostLoadGame / NewGame
-    -> mark Skyrim world as loaded
-    -> no IED capture yet
+- the 19 official IED equipment slots through `IED.GetSlottedForm`;
+- loaded IED `OBJECT ... [FormID]` scene objects;
+- stable `plugin + local FormID` identity;
+- slot/custom classification;
+- visibility/culling state;
+- object, attachment and evaluated anchor node names;
+- exact local XYZ position;
+- raw 3x3 rotation matrix;
+- scale.
 
-manual STR connection
-    -> remote STR player proxy appears
-    -> enable IED capture and remote overrides
+The raw matrix remains the wire representation. No Euler angles are serialized or used for the final remote orientation.
 
-STR disconnect / remote proxies disappear
-    -> stop captures
-    -> discard pending remote snapshots
-    -> disable runtime overrides
-```
+## STRPM transport and ProxyResolver
 
-For this prototype, the presence of at least one remote-player proxy is the
-activation signal relevant to IEDSyncTogether. This intentionally avoids
-assuming that `PostLoadGame` means STR is connected. It also means no slot
-synchronization work is performed while the player is alone and there is no
-remote actor to display.
-
-## IED 1.7.4 runtime integration
-
-Released IED 1.7.4 does not expose a public per-actor slot-override API.
-IEDSyncTogether therefore intercepts the single call to
-`IED::IEquipment::SelectSlotItem` inside `Controller::ProcessSlots`.
-
-The supported official IED 1.7.4 binary was identified from the upstream
-`SlavicPotato/ied-dev` commit:
+State is sent on:
 
 ```text
-3f014c3e8574ef0e88b2ec0b7cdf58b86c9737b0
+strpm.iedsynctogether.state.v1
 ```
 
-For that binary:
+using reliable + ordered STRPM messages.
+
+The resilient delivery behavior remains active:
+
+- changed state is retained as pending while transport is unavailable;
+- pending state retries every 1 second;
+- the current full state is retransmitted every 10 seconds as a heartbeat;
+- late-joining peers receive the current state without forcing an equipment change.
+
+IEDSyncTogether uses STRPM's public ProxyResolver API only. It does not scan `ProcessLists`, compare actor names, or guess dynamic proxy FormIDs. Proxy mapping callbacks are forwarded to the SKSE game-task queue before actor lookup or IED rendering.
+
+## Standard slot renderer
+
+Standard favorites continue to use the v0.8 raw-scenegraph approach:
+
+1. resolve `plugin + local FormID` on the receiving client;
+2. select the evaluated remote node/anchor;
+3. create an IED Custom Item owned by `IEDSyncTogether.esp`;
+4. preserve left-weapon semantics where required;
+5. call `IED.Evaluate`;
+6. find the actual generated `OBJECT ... [FormID]` scene object;
+7. restore its exact captured local position, raw 3x3 matrix and scale directly.
+
+This is the path that fixed the previously incorrect spear/bow/shield orientations.
+
+## Persistent transform watchdog
+
+v0.8.0 proved the raw transform itself is correct, but logs showed that IED can later re-evaluate an entry and restore its own temporary/default transform. The old immediate retries all completed before some of those late IED evaluations, so an item could remain incorrectly oriented until the next 10-second STRPM heartbeat.
+
+v0.9.0 replaces those immediate retries with a persistent local watchdog:
 
 ```text
-SelectSlotItem call site RVA : 0xE3806
-SelectSlotItem function RVA  : 0x146360
+100 ms tick
+   ↓
+for every tracked remote IEDSyncTogether display
+   ↓
+measure rotation / position / scale delta
+   ↓
+if already correct: do nothing
+if changed by IED: restore exact raw transform immediately
 ```
 
-Before installing the hook, IEDSyncTogether validates both the original
-five-byte `CALL rel32` instruction and the `SelectSlotItem` prologue. If either
-signature differs, synchronization is disabled and an error is written to
-`IEDSyncTogether.log`.
+The watchdog generates no network traffic. It only reads and, when needed, repairs IEDSyncTogether-owned remote scene objects on the Skyrim game thread.
 
-IED remains responsible for candidate discovery, model loading, transforms,
-nodes, filters and normal selection. IEDSyncTogether only changes the selected
-candidate when the actor is a synchronized Skyrim Together remote-player proxy.
-If the synchronized form is not present in IED's locally generated candidate
-set, the authoritative slot is left empty.
+Expected correction logs:
 
-The official IED DLL is **not modified or bundled**. Keep the normal IED 1.7.4
-installation enabled in Vortex.
+```text
+REMOTE IED WATCHDOG acquired: ...
+REMOTE IED WATCHDOG corrected: ...
+```
 
-The old source-patch files under `integration/ied-dev/` and
-`build-ied-patched.ps1` are retained as development/history material; they are
-not required by the runtime-hook package.
+If IED resets the same object again later, trace logs show:
 
-## Building
+```text
+REMOTE IED WATCHDOG recorrected: ...
+```
 
-Set `VCPKG_ROOT` if needed, then run:
+The target interval is 100 ms, so a late IED reset should no longer leave a visibly wrong orientation for several seconds.
+
+## Custom Item renderer
+
+v0.9.0 enables remote rendering for captured `IEDObjectKind::kCustom` objects.
+
+The renderer preserves the captured IED attachment mode directly from the scene graph:
+
+```text
+OBJECT P <node>  → parent attachment mode
+OBJECT R <node>  → reference attachment mode
+```
+
+It also resolves the transmitted form and applies the same raw scenegraph transform through the watchdog.
+
+This specifically covers Helmet Toggle 2 / DAV-style states already captured in previous tests.
+
+### Helmet in hand
+
+Captured locally as:
+
+```text
+OBJECT P AnimObjectR
+```
+
+Remote rendering uses:
+
+```text
+node = AnimObjectR
+attachmentMode = parent
+```
+
+### Helmet at the waist
+
+Captured locally as:
+
+```text
+OBJECT R ExtraPelvisArmorHelmet1
+```
+
+Remote rendering uses:
+
+```text
+node = ExtraPelvisArmorHelmet1
+attachmentMode = reference
+```
+
+The exact captured position, raw rotation matrix and scale are then maintained on the generated armor object.
+
+### Helmet absent
+
+When the sender's next full state no longer contains the Custom Item, IEDSyncTogether rebuilds its owned remote entries without that object. The remote helmet therefore disappears without any Helmet Toggle-specific protocol.
+
+The implementation is generic: other visible IED Custom Items using resolvable forms and `OBJECT P/R` attachment nodes follow the same path.
+
+## Diagnostic logs
+
+Startup should include:
+
+```text
+IEDSyncTogether v0.9.0 loading
+REMOTE IED transform watchdog started: interval=100ms
+STRPM branch mode: ... raw-scenegraph slot/custom renderer + transform watchdog ...
+```
+
+For a standard slot:
+
+```text
+REMOTE IED SLOT queued: ...
+rawTransform=watchdog
+```
+
+For the helmet or another Custom Item:
+
+```text
+REMOTE IED CUSTOM queued: ...
+attachmentMode=parent|reference
+rawTransform=watchdog
+expectedParent="OBJECT P/R ..."
+```
+
+When the generated object becomes available:
+
+```text
+REMOTE IED WATCHDOG acquired: ... kind=custom ...
+REMOTE IED WATCHDOG corrected: ... afterDelta(rot=0...,pos=0...,scale=0...)
+```
+
+The renderer summary now reports:
+
+```text
+REMOTE IED RENDER queued: ...
+visibleSlots=...
+customRendered=...
+trackedTransforms=...
+watchdogIntervalMs=100
+```
+
+## Build
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build-vortex.ps1
 ```
 
-The generated archive uses the version declared in `CMakeLists.txt`, for example:
+Expected archive:
 
 ```text
-dist/IEDSyncTogether-v0.1.4.zip
+dist/IEDSyncTogether-v0.9.0.zip
 ```
 
-Expected relevant contents:
+## v0.9.0 test protocol
 
-```text
-Data/IEDSyncTogether.esp
-Data/SKSE/Plugins/IEDSyncTogether.dll
-Data/SKSE/Plugins/IEDSyncTogether.ini
-```
+Install the same v0.9.0 archive on Player1 and Player2 together with the current STRPM/ProxyResolver build.
 
-`ImmersiveEquipmentDisplays.dll` must **not** appear in this archive. Install
-IED 1.7.4 separately and leave its normal scripts/assets/configuration enabled.
-There is no Vortex DLL conflict to resolve between IED and IEDSyncTogether.
+1. Keep IED NPC Displays disabled on both clients.
+2. Connect both players to the same STR server.
+3. Leave Kahel's normal favorites visible and verify their orientation remains correct after equipment/IED state changes.
+4. Trigger several changes quickly and watch for any multi-second wrong-orientation phase; the watchdog should correct late IED resets within roughly one tick.
+5. Put Kahel's helmet in hand and verify Player2 sees it on `AnimObjectR`.
+6. Move the helmet to the waist and verify Player2 sees it on `ExtraPelvisArmorHelmet1`.
+7. Hide/remove the Helmet Toggle Custom Item and verify it disappears remotely.
+8. Repeat in the opposite direction if Elir has a suitable Custom Item state.
+9. Send both `IEDSyncTogether.log` files if any display is missing, flickers persistently, or the watchdog repeatedly recorrects the same item.
 
-## Runtime integration semantics
+## Safety
 
-`IEDST_QuerySlotOverride(actorFormID, slotIndex, outFormID)` and the internal
-runtime hook use the same result contract:
-
-- `0`: actor is not a synchronized remote proxy; IED uses normal behavior.
-- `1`: authoritative slot is empty.
-- `2`: use `outFormID` if that form is present in IED's candidate set; otherwise leave the slot empty.
-
-No item is added, removed, equipped or unequipped by this integration.
-
-## Installation
-
-Install on both Skyrim Together clients:
-
-1. Immersive Equipment Displays **1.7.4** (official release).
-2. IEDSyncTogether's generated Vortex archive.
-3. Skyrim Together Reborn 1.8.0 and the normal prerequisites for the mod list.
-
-On startup, check `Documents/My Games/Skyrim Special Edition/SKSE/IEDSyncTogether.log`.
-A supported installation should contain a line similar to:
-
-```text
-IED 1.7.4 runtime hook installed: call RVA=0xE3806 SelectSlotItem RVA=0x146360
-```
-
-After loading a save while still disconnected from STR, the log should report:
-
-```text
-Game loaded; waiting for a remote Skyrim Together player before enabling IED synchronization
-```
-
-Only after another STR player becomes available should it report:
-
-```text
-STR session detected: 1 remote player proxy/proxies; enabling IED synchronization
-```
+IED remains responsible for creation, attachment, enable/disable and cleanup through its public Papyrus Custom Item API. IEDSyncTogether only updates the local transform of the specific scene objects it created for remote synchronization. No private IED detours are reintroduced.
 
 ## License
 
-IEDSyncTogether is MIT licensed. Immersive Equipment Displays remains a
-separate dependency and is not redistributed by the runtime-hook package.
+MIT
