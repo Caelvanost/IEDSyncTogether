@@ -1,6 +1,7 @@
 #include "PCH.h"
 #include "STRPMAdapter.h"
 
+#include "ProxyRegistry.h"
 #include "RemoteIEDRenderer.h"
 
 #include <Windows.h>
@@ -186,6 +187,7 @@ namespace IEDSyncTogether
             std::scoped_lock lock(_remoteMutex);
             _remoteStates.clear();
         }
+        ProxyRegistry::GetSingleton().Clear();
 
         _listener = {};
         _localConnectionID.store(0);
@@ -209,6 +211,7 @@ namespace IEDSyncTogether
             std::scoped_lock lock(_remoteMutex);
             _remoteStates.clear();
         }
+        ProxyRegistry::GetSingleton().Clear();
 
         if (auto* tasks = SKSE::GetTaskInterface()) {
             tasks->AddTask([]() { RemoteIEDRenderer::GetSingleton().Reset(); });
@@ -422,6 +425,10 @@ namespace IEDSyncTogether
             return;
         }
 
+        // Ensure the patched IED bridge sees this actor as a remote proxy before
+        // RemoteIEDRenderer invokes IED.Evaluate.
+        ProxyRegistry::GetSingleton().Register(proxyFormID);
+
         SKSE::log::info(
             "REMOTE IED mapping resolved: connection={} name=\"{}\" proxy={:08X} sequence={}",
             connectionID,
@@ -443,32 +450,41 @@ namespace IEDSyncTogether
             return;
         }
 
+        auto& proxies = ProxyRegistry::GetSingleton();
+
         switch (event.type) {
         case STRPM::ProxyMappingEventType::kAdded:
+            proxies.Register(event.newFormID);
             SKSE::log::info(
-                "STRPM proxy mapping added: connection={} proxy={:08X}",
+                "IED bridge proxy registered: connection={} proxy={:08X} tracked={}",
                 event.connectionID,
-                event.newFormID);
+                event.newFormID,
+                proxies.Size());
             ApplyRemoteOnGameThread(event.connectionID, true);
             break;
 
         case STRPM::ProxyMappingEventType::kUpdated:
-            SKSE::log::info(
-                "STRPM proxy mapping updated: connection={} old={:08X} new={:08X}",
-                event.connectionID,
-                event.oldFormID,
-                event.newFormID);
             if (event.oldFormID != STRPM::kInvalidProxyFormID && event.oldFormID != event.newFormID) {
+                proxies.Unregister(event.oldFormID);
                 RemoteIEDRenderer::GetSingleton().ClearProxy(event.oldFormID);
             }
+            proxies.Register(event.newFormID);
+            SKSE::log::info(
+                "IED bridge proxy updated: connection={} old={:08X} new={:08X} tracked={}",
+                event.connectionID,
+                event.oldFormID,
+                event.newFormID,
+                proxies.Size());
             ApplyRemoteOnGameThread(event.connectionID, true);
             break;
 
         case STRPM::ProxyMappingEventType::kRemoved:
+            proxies.Unregister(event.oldFormID);
             SKSE::log::info(
-                "STRPM proxy mapping removed: connection={} proxy={:08X}",
+                "IED bridge proxy removed: connection={} proxy={:08X} tracked={}",
                 event.connectionID,
-                event.oldFormID);
+                event.oldFormID,
+                proxies.Size());
             RemoteIEDRenderer::GetSingleton().ClearProxy(event.oldFormID);
             {
                 std::scoped_lock lock(_remoteMutex);
@@ -477,7 +493,8 @@ namespace IEDSyncTogether
             break;
 
         case STRPM::ProxyMappingEventType::kCleared:
-            SKSE::log::info("STRPM proxy mappings cleared");
+            proxies.Clear();
+            SKSE::log::info("IED bridge proxy registry cleared");
             RemoteIEDRenderer::GetSingleton().Reset();
             {
                 std::scoped_lock lock(_remoteMutex);
@@ -494,6 +511,28 @@ namespace IEDSyncTogether
         auto* self = static_cast<STRPMAdapter*>(userData);
         if (!self || !self->_running.load() || !event) {
             return;
+        }
+
+        // The resolver callback can arrive from STR's bridge thread. Update only
+        // the tiny thread-safe registry here so IED cannot evaluate the new proxy
+        // in the gap before the game-thread task runs.
+        auto& proxies = ProxyRegistry::GetSingleton();
+        switch (event->type) {
+        case STRPM::ProxyMappingEventType::kAdded:
+            proxies.Register(event->newFormID);
+            break;
+        case STRPM::ProxyMappingEventType::kUpdated:
+            if (event->oldFormID != STRPM::kInvalidProxyFormID && event->oldFormID != event->newFormID) {
+                proxies.Unregister(event->oldFormID);
+            }
+            proxies.Register(event->newFormID);
+            break;
+        case STRPM::ProxyMappingEventType::kRemoved:
+            proxies.Unregister(event->oldFormID);
+            break;
+        case STRPM::ProxyMappingEventType::kCleared:
+            proxies.Clear();
+            break;
         }
 
         const auto copy = *event;
