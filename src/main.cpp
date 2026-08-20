@@ -2,6 +2,7 @@
 
 #include "IEDSyncTogether/Interface.h"
 #include "LocalCaptureProbe.h"
+#include "RemoteIEDRenderer.h"
 #include "STRPMAdapter.h"
 
 namespace
@@ -28,6 +29,8 @@ namespace
         switch (message->type) {
         case SKSE::MessagingInterface::kDataLoaded:
         {
+            RemoteIEDRenderer::GetSingleton().Start();
+
             auto& adapter = STRPMAdapter::GetSingleton();
             const bool transportReady = adapter.Start();
             auto& capture = LocalCaptureProbe::GetSingleton();
@@ -37,7 +40,7 @@ namespace
                 });
             capture.Start();
             SKSE::log::info(
-                "STRPM branch mode: local capture + STRPM transport + ProxyResolver + raw-scenegraph standard-slot renderer; Custom Item rendering disabled; transportReady={}",
+                "STRPM branch mode: local capture + STRPM transport + ProxyResolver + raw-scenegraph slot/custom renderer + transform watchdog; transportReady={}",
                 transportReady ? 1 : 0);
             break;
         }
