@@ -16,8 +16,10 @@ namespace IEDSyncTogether
     {
         constexpr std::string_view kPapyrusClass = "IED";
         constexpr std::string_view kPluginKey = "IEDSyncTogether.esp";
-        constexpr std::uint32_t kRawPatchMaxAttempts = 45;
-        constexpr std::uint32_t kRawPatchRequiredSuccesses = 3;
+        constexpr auto kWatchdogInterval = std::chrono::milliseconds(100);
+        constexpr float kRotationEpsilon = 1.0e-4f;
+        constexpr float kPositionEpsilon = 1.0e-3f;
+        constexpr float kScaleEpsilon = 1.0e-4f;
 
         constexpr std::array<std::string_view, 19> kGearNodes{
             "WeaponSword",
@@ -87,10 +89,6 @@ namespace IEDSyncTogether
         {
             if (!object.anchorNode.empty() &&
                 (object.anchorNode.starts_with("MOV ") || object.anchorNode.starts_with("CME "))) {
-                // The captured OBJECT ... local transform is already expressed
-                // in the evaluated MOV/CME parent frame. Parent attachment mode
-                // lets us restore that raw local transform without IED
-                // pre-multiplying a managed/reference-node transform again.
                 return { object.anchorNode, "captured-anchor", true };
             }
 
@@ -110,6 +108,38 @@ namespace IEDSyncTogether
                 }
             }
             return { std::string(kGearNodes[slot]), "slot-fallback", false };
+        }
+
+        std::optional<NodeSelection> CustomNode(const CapturedIEDObject& object)
+        {
+            constexpr std::string_view kReferencePrefix = "OBJECT R ";
+            constexpr std::string_view kParentPrefix = "OBJECT P ";
+
+            if (object.attachmentNode.starts_with(kReferencePrefix)) {
+                const auto suffix = std::string_view(object.attachmentNode).substr(kReferencePrefix.size());
+                if (!suffix.empty()) {
+                    return NodeSelection{ std::string(suffix), "captured-custom-attachment", false };
+                }
+            }
+            if (object.attachmentNode.starts_with(kParentPrefix)) {
+                const auto suffix = std::string_view(object.attachmentNode).substr(kParentPrefix.size());
+                if (!suffix.empty()) {
+                    return NodeSelection{ std::string(suffix), "captured-custom-attachment", true };
+                }
+            }
+
+            if (!object.anchorNode.empty()) {
+                return NodeSelection{ object.anchorNode, "custom-anchor-fallback", true };
+            }
+            return std::nullopt;
+        }
+
+        std::string ExpectedAttachment(const NodeSelection& node)
+        {
+            return fmt::format(
+                "OBJECT {} {}",
+                node.parentAttachment ? "P" : "R",
+                node.node);
         }
 
         std::optional<RE::FormID> ParseIEDObjectFormID(std::string_view name)
@@ -199,179 +229,93 @@ namespace IEDSyncTogether
             });
         }
 
-        struct RawTransformPatchRequest
+        void ApplyRawTransform(RE::NiAVObject* object, const CapturedIEDObject& captured)
         {
-            STRPM::ConnectionID connectionID{ 0 };
-            STRPM::ProxyFormID proxyFormID{ STRPM::kInvalidProxyFormID };
-            std::string displayName;
-            std::size_t slot{ 0 };
-            RE::FormID remoteFormID{ 0 };
-            std::string expectedAttachment;
-            CapturedIEDObject object;
-            std::uint32_t attempts{ 0 };
-            std::uint32_t successfulPatches{ 0 };
-            bool firstSuccessLogged{ false };
-        };
-
-        void QueueRawTransformPatch(std::shared_ptr<RawTransformPatchRequest> request);
-
-        void RunRawTransformPatch(const std::shared_ptr<RawTransformPatchRequest>& request)
-        {
-            if (!request) {
+            if (!object) {
                 return;
             }
 
-            ++request->attempts;
+            object->local.translate.x = captured.position[0];
+            object->local.translate.y = captured.position[1];
+            object->local.translate.z = captured.position[2];
+            object->local.scale = std::clamp(captured.scale, 0.01f, 100.0f);
 
-            auto* form = RE::TESForm::LookupByID(request->proxyFormID);
-            auto* actor = form ? form->As<RE::Actor>() : nullptr;
-            auto* root = actor ? actor->Get3D1(false) : nullptr;
-            auto* remoteObject = root ? FindRemoteIEDObject(
-                root,
-                request->remoteFormID,
-                request->expectedAttachment) : nullptr;
-
-            if (remoteObject) {
-                const auto before = remoteObject->local;
-
-                remoteObject->local.translate.x = request->object.position[0];
-                remoteObject->local.translate.y = request->object.position[1];
-                remoteObject->local.translate.z = request->object.position[2];
-                remoteObject->local.scale = std::clamp(request->object.scale, 0.01f, 100.0f);
-
-                std::size_t index = 0;
-                for (std::size_t row = 0; row < 3; ++row) {
-                    for (std::size_t col = 0; col < 3; ++col) {
-                        remoteObject->local.rotate.entry[row][col] = request->object.rotationMatrix[index++];
-                    }
-                }
-
-                // Recompute world-space data from the exact local transform we
-                // just restored. Avoid NiAVObject::Update() here because that
-                // also runs controllers and could alter the local transform.
-                RE::NiUpdateData updateData{};
-                updateData.time = 0.0f;
-                remoteObject->UpdateWorldData(&updateData);
-                remoteObject->UpdateWorldBound();
-
-                const auto after = remoteObject->local;
-                const auto beforeMatrixDelta = MaxMatrixDelta(before.rotate, request->object.rotationMatrix);
-                const auto afterMatrixDelta = MaxMatrixDelta(after.rotate, request->object.rotationMatrix);
-                const auto beforePositionDelta = MaxPositionDelta(before.translate, request->object.position);
-                const auto afterPositionDelta = MaxPositionDelta(after.translate, request->object.position);
-                const auto beforeScaleDelta = std::abs(before.scale - request->object.scale);
-                const auto afterScaleDelta = std::abs(after.scale - request->object.scale);
-
-                if (!request->firstSuccessLogged) {
-                    request->firstSuccessLogged = true;
-                    SKSE::log::info(
-                        "REMOTE IED RAW XFORM applied: connection={} name=\"{}\" proxy={:08X} slot={} remoteForm={:08X} parent=\"{}\" attempt={} beforeDelta(rot={:.6f},pos={:.6f},scale={:.6f}) afterDelta(rot={:.6f},pos={:.6f},scale={:.6f}) expectedPos=({:.3f},{:.3f},{:.3f}) expectedScale={:.3f} expectedRot=[{:.3f},{:.3f},{:.3f};{:.3f},{:.3f},{:.3f};{:.3f},{:.3f},{:.3f}] beforeRot=[{:.3f},{:.3f},{:.3f};{:.3f},{:.3f},{:.3f};{:.3f},{:.3f},{:.3f}] afterRot=[{:.3f},{:.3f},{:.3f};{:.3f},{:.3f},{:.3f};{:.3f},{:.3f},{:.3f}]",
-                        request->connectionID,
-                        request->displayName,
-                        request->proxyFormID,
-                        request->slot,
-                        request->remoteFormID,
-                        request->expectedAttachment,
-                        request->attempts,
-                        beforeMatrixDelta,
-                        beforePositionDelta,
-                        beforeScaleDelta,
-                        afterMatrixDelta,
-                        afterPositionDelta,
-                        afterScaleDelta,
-                        request->object.position[0], request->object.position[1], request->object.position[2],
-                        request->object.scale,
-                        request->object.rotationMatrix[0], request->object.rotationMatrix[1], request->object.rotationMatrix[2],
-                        request->object.rotationMatrix[3], request->object.rotationMatrix[4], request->object.rotationMatrix[5],
-                        request->object.rotationMatrix[6], request->object.rotationMatrix[7], request->object.rotationMatrix[8],
-                        before.rotate.entry[0][0], before.rotate.entry[0][1], before.rotate.entry[0][2],
-                        before.rotate.entry[1][0], before.rotate.entry[1][1], before.rotate.entry[1][2],
-                        before.rotate.entry[2][0], before.rotate.entry[2][1], before.rotate.entry[2][2],
-                        after.rotate.entry[0][0], after.rotate.entry[0][1], after.rotate.entry[0][2],
-                        after.rotate.entry[1][0], after.rotate.entry[1][1], after.rotate.entry[1][2],
-                        after.rotate.entry[2][0], after.rotate.entry[2][1], after.rotate.entry[2][2]);
-                }
-
-                ++request->successfulPatches;
-                if (request->successfulPatches >= kRawPatchRequiredSuccesses) {
-                    SKSE::log::info(
-                        "REMOTE IED RAW XFORM verified: connection={} name=\"{}\" proxy={:08X} slot={} remoteForm={:08X} attempts={} successfulPatches={} matrixDelta={:.6f} positionDelta={:.6f} scaleDelta={:.6f}",
-                        request->connectionID,
-                        request->displayName,
-                        request->proxyFormID,
-                        request->slot,
-                        request->remoteFormID,
-                        request->attempts,
-                        request->successfulPatches,
-                        afterMatrixDelta,
-                        afterPositionDelta,
-                        afterScaleDelta);
-                    return;
+            std::size_t index = 0;
+            for (std::size_t row = 0; row < 3; ++row) {
+                for (std::size_t col = 0; col < 3; ++col) {
+                    object->local.rotate.entry[row][col] = captured.rotationMatrix[index++];
                 }
             }
 
-            if (request->attempts < kRawPatchMaxAttempts) {
-                QueueRawTransformPatch(request);
-                return;
-            }
-
-            SKSE::log::warn(
-                "REMOTE IED RAW XFORM failed: connection={} name=\"{}\" proxy={:08X} slot={} remoteForm={:08X} parent=\"{}\" attempts={} successfulPatches={}",
-                request->connectionID,
-                request->displayName,
-                request->proxyFormID,
-                request->slot,
-                request->remoteFormID,
-                request->expectedAttachment,
-                request->attempts,
-                request->successfulPatches);
+            RE::NiUpdateData updateData{};
+            updateData.time = 0.0f;
+            object->UpdateWorldData(&updateData);
+            object->UpdateWorldBound();
         }
 
-        void QueueRawTransformPatch(std::shared_ptr<RawTransformPatchRequest> request)
+        bool ConfigureRemoteItem(
+            RE::Actor* actor,
+            const std::string& itemName,
+            RE::TESForm* remoteForm,
+            const NodeSelection& node,
+            bool leftWeapon)
         {
-            if (auto* tasks = SKSE::GetTaskInterface()) {
-                tasks->AddTask([request = std::move(request)]() {
-                    RunRawTransformPatch(request);
-                });
-            }
-        }
+            bool dispatched = true;
+            dispatched &= DispatchNoResult(
+                "CreateItemActor",
+                static_cast<RE::Actor*>(actor),
+                std::string(kPluginKey),
+                itemName,
+                false,
+                remoteForm,
+                false,
+                node.node);
 
-        std::size_t QueueRawPatches(
-            STRPM::ConnectionID connectionID,
-            STRPM::ProxyFormID proxyFormID,
-            std::string_view displayName,
-            const std::array<const CapturedIEDObject*, 19>& visibleSlots)
-        {
-            std::size_t queued = 0;
-            for (std::size_t slot = 0; slot < visibleSlots.size(); ++slot) {
-                const auto* object = visibleSlots[slot];
-                if (!object) {
-                    continue;
+            dispatched &= DispatchNoResult(
+                "SetItemFormActor",
+                static_cast<RE::Actor*>(actor),
+                std::string(kPluginKey),
+                itemName,
+                true,
+                remoteForm);
+
+            for (const bool female : { false, true }) {
+                dispatched &= DispatchNoResult(
+                    "SetItemAttachmentModeActor",
+                    static_cast<RE::Actor*>(actor),
+                    std::string(kPluginKey),
+                    itemName,
+                    female,
+                    node.parentAttachment ? 1 : 0,
+                    false);
+
+                dispatched &= DispatchNoResult(
+                    "SetItemNodeActor",
+                    static_cast<RE::Actor*>(actor),
+                    std::string(kPluginKey),
+                    itemName,
+                    female,
+                    node.node);
+
+                if (leftWeapon) {
+                    dispatched &= DispatchNoResult(
+                        "SetItemLeftWeaponActor",
+                        static_cast<RE::Actor*>(actor),
+                        std::string(kPluginKey),
+                        itemName,
+                        female,
+                        true);
                 }
 
-                auto* remoteForm = ResolveFormIdentity(object->form);
-                if (!remoteForm) {
-                    continue;
-                }
-
-                const auto nodeSelection = SlotNode(*object, slot);
-                const auto attachmentName = fmt::format(
-                    "OBJECT {} {}",
-                    nodeSelection.parentAttachment ? "P" : "R",
-                    nodeSelection.node);
-
-                auto request = std::make_shared<RawTransformPatchRequest>();
-                request->connectionID = connectionID;
-                request->proxyFormID = proxyFormID;
-                request->displayName = std::string(displayName);
-                request->slot = slot;
-                request->remoteFormID = remoteForm->GetFormID();
-                request->expectedAttachment = attachmentName;
-                request->object = *object;
-                QueueRawTransformPatch(std::move(request));
-                ++queued;
+                dispatched &= DispatchNoResult(
+                    "SetItemEnabledActor",
+                    static_cast<RE::Actor*>(actor),
+                    std::string(kPluginKey),
+                    itemName,
+                    female,
+                    true);
             }
-            return queued;
+            return dispatched;
         }
 
         void ClearOwnedItems(RE::Actor* actor)
@@ -398,6 +342,147 @@ namespace IEDSyncTogether
     {
         static RemoteIEDRenderer instance;
         return instance;
+    }
+
+    void RemoteIEDRenderer::Start()
+    {
+        if (_watchdogThread.joinable()) {
+            return;
+        }
+
+        _watchdogThread = std::jthread(
+            [this](std::stop_token stopToken) {
+                WatchdogLoop(stopToken);
+            });
+        SKSE::log::info(
+            "REMOTE IED transform watchdog started: interval={}ms",
+            kWatchdogInterval.count());
+    }
+
+    void RemoteIEDRenderer::WatchdogLoop(std::stop_token stopToken)
+    {
+        while (!stopToken.stop_requested()) {
+            std::this_thread::sleep_for(kWatchdogInterval);
+            if (stopToken.stop_requested()) {
+                break;
+            }
+            ScheduleWatchdogTick();
+        }
+    }
+
+    void RemoteIEDRenderer::ScheduleWatchdogTick()
+    {
+        if (_watchdogTaskQueued.exchange(true)) {
+            return;
+        }
+
+        auto* tasks = SKSE::GetTaskInterface();
+        if (!tasks) {
+            _watchdogTaskQueued.store(false);
+            return;
+        }
+
+        tasks->AddTask(
+            [this]() {
+                _watchdogTaskQueued.store(false);
+                WatchdogTick();
+            });
+    }
+
+    void RemoteIEDRenderer::WatchdogTick()
+    {
+        for (auto& [proxyFormID, proxyState] : _trackedProxies) {
+            auto* form = RE::TESForm::LookupByID(proxyFormID);
+            auto* actor = form ? form->As<RE::Actor>() : nullptr;
+            auto* root = actor ? actor->Get3D1(false) : nullptr;
+            if (!root || actor == RE::PlayerCharacter::GetSingleton()) {
+                continue;
+            }
+
+            for (auto& tracked : proxyState.objects) {
+                auto* remoteObject = FindRemoteIEDObject(
+                    root,
+                    tracked.remoteFormID,
+                    tracked.expectedAttachment);
+                if (!remoteObject) {
+                    continue;
+                }
+
+                const auto rotationDelta = MaxMatrixDelta(
+                    remoteObject->local.rotate,
+                    tracked.object.rotationMatrix);
+                const auto positionDelta = MaxPositionDelta(
+                    remoteObject->local.translate,
+                    tracked.object.position);
+                const auto scaleDelta = std::abs(remoteObject->local.scale - tracked.object.scale);
+                const bool needsCorrection =
+                    rotationDelta > kRotationEpsilon ||
+                    positionDelta > kPositionEpsilon ||
+                    scaleDelta > kScaleEpsilon;
+
+                if (!tracked.acquired) {
+                    tracked.acquired = true;
+                    SKSE::log::info(
+                        "REMOTE IED WATCHDOG acquired: connection={} name=\"{}\" proxy={:08X} kind={} slot={} item=\"{}\" remoteForm={:08X} parent=\"{}\" initialDelta(rot={:.6f},pos={:.6f},scale={:.6f})",
+                        proxyState.connectionID,
+                        proxyState.displayName,
+                        proxyFormID,
+                        tracked.kind,
+                        tracked.slot ? static_cast<int>(*tracked.slot) : -1,
+                        tracked.itemName,
+                        tracked.remoteFormID,
+                        tracked.expectedAttachment,
+                        rotationDelta,
+                        positionDelta,
+                        scaleDelta);
+                }
+
+                if (!needsCorrection) {
+                    continue;
+                }
+
+                ApplyRawTransform(remoteObject, tracked.object);
+
+                const auto afterRotationDelta = MaxMatrixDelta(
+                    remoteObject->local.rotate,
+                    tracked.object.rotationMatrix);
+                const auto afterPositionDelta = MaxPositionDelta(
+                    remoteObject->local.translate,
+                    tracked.object.position);
+                const auto afterScaleDelta = std::abs(remoteObject->local.scale - tracked.object.scale);
+                ++tracked.corrections;
+
+                if (tracked.corrections == 1) {
+                    SKSE::log::info(
+                        "REMOTE IED WATCHDOG corrected: connection={} name=\"{}\" proxy={:08X} kind={} slot={} item=\"{}\" remoteForm={:08X} parent=\"{}\" beforeDelta(rot={:.6f},pos={:.6f},scale={:.6f}) afterDelta(rot={:.6f},pos={:.6f},scale={:.6f})",
+                        proxyState.connectionID,
+                        proxyState.displayName,
+                        proxyFormID,
+                        tracked.kind,
+                        tracked.slot ? static_cast<int>(*tracked.slot) : -1,
+                        tracked.itemName,
+                        tracked.remoteFormID,
+                        tracked.expectedAttachment,
+                        rotationDelta,
+                        positionDelta,
+                        scaleDelta,
+                        afterRotationDelta,
+                        afterPositionDelta,
+                        afterScaleDelta);
+                } else {
+                    SKSE::log::trace(
+                        "REMOTE IED WATCHDOG recorrected: proxy={:08X} kind={} slot={} item=\"{}\" correction={} beforeDelta(rot={:.6f},pos={:.6f},scale={:.6f})",
+                        proxyFormID,
+                        tracked.kind,
+                        tracked.slot ? static_cast<int>(*tracked.slot) : -1,
+                        tracked.itemName,
+                        tracked.corrections,
+                        rotationDelta,
+                        positionDelta,
+                        scaleDelta);
+                }
+            }
+        }
     }
 
     bool RemoteIEDRenderer::Apply(
@@ -433,17 +518,11 @@ namespace IEDSyncTogether
         if (!force) {
             const auto it = _appliedSignatures.find(proxyFormID);
             if (it != _appliedSignatures.end() && it->second == signature) {
-                const auto rawQueued = QueueRawPatches(
-                    connectionID,
-                    proxyFormID,
-                    displayName,
-                    visibleSlots);
-                SKSE::log::trace(
-                    "REMOTE IED RAW refresh queued: connection={} name=\"{}\" proxy={:08X} slots={}",
-                    connectionID,
-                    displayName,
-                    proxyFormID,
-                    rawQueued);
+                if (auto tracked = _trackedProxies.find(proxyFormID); tracked != _trackedProxies.end()) {
+                    tracked->second.connectionID = connectionID;
+                    tracked->second.displayName = std::string(displayName);
+                }
+                ScheduleWatchdogTick();
                 return true;
             }
         }
@@ -458,7 +537,11 @@ namespace IEDSyncTogether
             static_cast<RE::Actor*>(actor),
             std::string(kPluginKey));
 
-        std::size_t rendered = 0;
+        TrackedProxyState trackedProxy;
+        trackedProxy.connectionID = connectionID;
+        trackedProxy.displayName = std::string(displayName);
+
+        std::size_t renderedSlots = 0;
         for (std::size_t slot = 0; slot < visibleSlots.size(); ++slot) {
             const auto* object = visibleSlots[slot];
             if (!object) {
@@ -479,67 +562,25 @@ namespace IEDSyncTogether
 
             const auto itemName = fmt::format("remote-slot-{:02}", slot);
             const auto nodeSelection = SlotNode(*object, slot);
-
-            dispatched &= DispatchNoResult(
-                "CreateItemActor",
-                static_cast<RE::Actor*>(actor),
-                std::string(kPluginKey),
+            dispatched &= ConfigureRemoteItem(
+                actor,
                 itemName,
-                false,
                 remoteForm,
-                false,
-                nodeSelection.node);
+                nodeSelection,
+                kLeftWeaponSlots[slot]);
 
-            dispatched &= DispatchNoResult(
-                "SetItemFormActor",
-                static_cast<RE::Actor*>(actor),
-                std::string(kPluginKey),
-                itemName,
-                true,
-                remoteForm);
+            TrackedRemoteObject tracked;
+            tracked.itemName = itemName;
+            tracked.kind = "slot";
+            tracked.slot = slot;
+            tracked.remoteFormID = remoteForm->GetFormID();
+            tracked.expectedAttachment = ExpectedAttachment(nodeSelection);
+            tracked.object = *object;
+            trackedProxy.objects.emplace_back(std::move(tracked));
 
-            for (const bool female : { false, true }) {
-                if (nodeSelection.parentAttachment) {
-                    dispatched &= DispatchNoResult(
-                        "SetItemAttachmentModeActor",
-                        static_cast<RE::Actor*>(actor),
-                        std::string(kPluginKey),
-                        itemName,
-                        female,
-                        1,
-                        false);
-                }
-
-                dispatched &= DispatchNoResult(
-                    "SetItemNodeActor",
-                    static_cast<RE::Actor*>(actor),
-                    std::string(kPluginKey),
-                    itemName,
-                    female,
-                    nodeSelection.node);
-
-                if (kLeftWeaponSlots[slot]) {
-                    dispatched &= DispatchNoResult(
-                        "SetItemLeftWeaponActor",
-                        static_cast<RE::Actor*>(actor),
-                        std::string(kPluginKey),
-                        itemName,
-                        female,
-                        true);
-                }
-
-                dispatched &= DispatchNoResult(
-                    "SetItemEnabledActor",
-                    static_cast<RE::Actor*>(actor),
-                    std::string(kPluginKey),
-                    itemName,
-                    female,
-                    true);
-            }
-
-            ++rendered;
+            ++renderedSlots;
             SKSE::log::info(
-                "REMOTE IED SLOT queued: connection={} name=\"{}\" proxy={:08X} slot={} plugin=\"{}\" localForm={:X} remoteForm={:08X} node=\"{}\" nodeSource={} attachmentMode={} rawTransform=deferred expectedParent=\"OBJECT {} {}\" capturedAttachment=\"{}\" capturedAnchor=\"{}\"",
+                "REMOTE IED SLOT queued: connection={} name=\"{}\" proxy={:08X} slot={} plugin=\"{}\" localForm={:X} remoteForm={:08X} node=\"{}\" nodeSource={} attachmentMode={} rawTransform=watchdog expectedParent=\"{}\" capturedAttachment=\"{}\" capturedAnchor=\"{}\"",
                 connectionID,
                 displayName,
                 proxyFormID,
@@ -550,37 +591,99 @@ namespace IEDSyncTogether
                 nodeSelection.node,
                 nodeSelection.source,
                 nodeSelection.parentAttachment ? "parent" : "reference",
-                nodeSelection.parentAttachment ? "P" : "R",
-                nodeSelection.node,
+                ExpectedAttachment(nodeSelection),
                 object->attachmentNode,
                 object->anchorNode);
+        }
+
+        std::size_t renderedCustom = 0;
+        std::size_t customIndex = 0;
+        for (const auto& object : state.objects) {
+            if (object.kind != IEDObjectKind::kCustom || !object.visible) {
+                continue;
+            }
+
+            const auto nodeSelection = CustomNode(object);
+            if (!nodeSelection) {
+                SKSE::log::warn(
+                    "REMOTE IED CUSTOM skipped missing attachment: connection={} proxy={:08X} plugin=\"{}\" localForm={:X} attachment=\"{}\" anchor=\"{}\"",
+                    connectionID,
+                    proxyFormID,
+                    object.form.plugin,
+                    object.form.localFormID,
+                    object.attachmentNode,
+                    object.anchorNode);
+                continue;
+            }
+
+            auto* remoteForm = ResolveFormIdentity(object.form);
+            if (!remoteForm) {
+                SKSE::log::warn(
+                    "REMOTE IED CUSTOM skipped unresolved form: connection={} proxy={:08X} plugin=\"{}\" localForm={:X}",
+                    connectionID,
+                    proxyFormID,
+                    object.form.plugin,
+                    object.form.localFormID);
+                continue;
+            }
+
+            const auto itemName = fmt::format("remote-custom-{:02}", customIndex++);
+            dispatched &= ConfigureRemoteItem(
+                actor,
+                itemName,
+                remoteForm,
+                *nodeSelection,
+                false);
+
+            TrackedRemoteObject tracked;
+            tracked.itemName = itemName;
+            tracked.kind = "custom";
+            tracked.remoteFormID = remoteForm->GetFormID();
+            tracked.expectedAttachment = object.attachmentNode.starts_with("OBJECT R ") ||
+                    object.attachmentNode.starts_with("OBJECT P ") ?
+                object.attachmentNode : ExpectedAttachment(*nodeSelection);
+            tracked.object = object;
+            trackedProxy.objects.emplace_back(std::move(tracked));
+
+            ++renderedCustom;
+            SKSE::log::info(
+                "REMOTE IED CUSTOM queued: connection={} name=\"{}\" proxy={:08X} plugin=\"{}\" localForm={:X} remoteForm={:08X} objectNode=\"{}\" node=\"{}\" nodeSource={} attachmentMode={} rawTransform=watchdog expectedParent=\"{}\" capturedAttachment=\"{}\" capturedAnchor=\"{}\"",
+                connectionID,
+                displayName,
+                proxyFormID,
+                object.form.plugin,
+                object.form.localFormID,
+                remoteForm->GetFormID(),
+                object.objectNode,
+                nodeSelection->node,
+                nodeSelection->source,
+                nodeSelection->parentAttachment ? "parent" : "reference",
+                trackedProxy.objects.back().expectedAttachment,
+                object.attachmentNode,
+                object.anchorNode);
         }
 
         dispatched &= DispatchNoResult(
             "Evaluate",
             static_cast<RE::Actor*>(actor));
 
-        const auto rawQueued = QueueRawPatches(
-            connectionID,
-            proxyFormID,
-            displayName,
-            visibleSlots);
+        _trackedProxies[proxyFormID] = std::move(trackedProxy);
+        ScheduleWatchdogTick();
 
         if (dispatched) {
             _appliedSignatures[proxyFormID] = signature;
         }
 
         SKSE::log::info(
-            "REMOTE IED RENDER queued: connection={} name=\"{}\" proxy={:08X} visibleSlots={} dispatchAccepted={} rawPatchesQueued={} customObjectsIgnored={}",
+            "REMOTE IED RENDER queued: connection={} name=\"{}\" proxy={:08X} visibleSlots={} customRendered={} trackedTransforms={} dispatchAccepted={} watchdogIntervalMs={}",
             connectionID,
             displayName,
             proxyFormID,
-            rendered,
+            renderedSlots,
+            renderedCustom,
+            _trackedProxies[proxyFormID].objects.size(),
             dispatched ? 1 : 0,
-            rawQueued,
-            std::ranges::count_if(
-                state.objects,
-                [](const CapturedIEDObject& object) { return object.kind == IEDObjectKind::kCustom; }));
+            kWatchdogInterval.count());
         return dispatched;
     }
 
@@ -590,26 +693,32 @@ namespace IEDSyncTogether
             return;
         }
 
+        _trackedProxies.erase(proxyFormID);
+        _appliedSignatures.erase(proxyFormID);
+
         auto* form = RE::TESForm::LookupByID(proxyFormID);
         auto* actor = form ? form->As<RE::Actor>() : nullptr;
         if (actor && actor != RE::PlayerCharacter::GetSingleton()) {
             ClearOwnedItems(actor);
             SKSE::log::info("REMOTE IED RENDER cleared: proxy={:08X}", proxyFormID);
         }
-        _appliedSignatures.erase(proxyFormID);
     }
 
     void RemoteIEDRenderer::Reset()
     {
-        std::vector<STRPM::ProxyFormID> proxies;
-        proxies.reserve(_appliedSignatures.size());
+        std::unordered_set<STRPM::ProxyFormID> proxies;
+        proxies.reserve(_appliedSignatures.size() + _trackedProxies.size());
         for (const auto& [proxyFormID, _] : _appliedSignatures) {
-            proxies.push_back(proxyFormID);
+            proxies.emplace(proxyFormID);
+        }
+        for (const auto& [proxyFormID, _] : _trackedProxies) {
+            proxies.emplace(proxyFormID);
         }
 
         for (const auto proxyFormID : proxies) {
             ClearProxy(proxyFormID);
         }
         _appliedSignatures.clear();
+        _trackedProxies.clear();
     }
 }
