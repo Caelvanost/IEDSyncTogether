@@ -1,6 +1,7 @@
 #include "PCH.h"
 #include "LocalIEDState.h"
 
+#include <Windows.h>
 #include <charconv>
 
 namespace IEDSyncTogether
@@ -41,6 +42,29 @@ namespace IEDSyncTogether
                 auto result = std::from_chars(first, last, out);
                 return result.ec == std::errc{} && result.ptr == last;
             }
+        }
+
+        bool IsAnimSyncLoaded()
+        {
+            return GetModuleHandleW(L"AnimSyncTogether.dll") != nullptr;
+        }
+
+        bool IsAnimSyncOwnedCustomItem(const CapturedIEDObject& object)
+        {
+            if (object.kind != IEDObjectKind::kCustom || !IsAnimSyncLoaded()) {
+                return false;
+            }
+
+            // AnimSync replays Helmet Toggle / GPMA inputs on the remote proxy.
+            // OAR therefore owns transient animation objects attached to
+            // AnimObjectR/L. Recreating the same object through IEDSync would
+            // produce a duplicate helmet during the animation. Persistent IED
+            // displays such as ExtraPelvisArmorHelmet1 are intentionally not
+            // filtered and remain owned by IEDSyncTogether.
+            return object.attachmentNode == "OBJECT P AnimObjectR" ||
+                   object.attachmentNode == "OBJECT R AnimObjectR" ||
+                   object.attachmentNode == "OBJECT P AnimObjectL" ||
+                   object.attachmentNode == "OBJECT R AnimObjectL";
         }
     }
 
@@ -134,6 +158,17 @@ namespace IEDSyncTogether
                     return std::nullopt;
                 }
             }
+
+            if (IsAnimSyncOwnedCustomItem(object)) {
+                SKSE::log::debug(
+                    "REMOTE IED CUSTOM delegated to AnimSync/OAR: plugin=\"{}\" localForm={:X} attachment=\"{}\" anchor=\"{}\"",
+                    object.form.plugin,
+                    object.form.localFormID,
+                    object.attachmentNode,
+                    object.anchorNode);
+                continue;
+            }
+
             state.objects.emplace_back(std::move(object));
         }
 
