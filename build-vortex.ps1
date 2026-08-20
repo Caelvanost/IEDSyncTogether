@@ -1,6 +1,7 @@
 param(
     [string]$VcpkgRoot = $env:VCPKG_ROOT,
-    [string]$Configuration = "Release"
+    [string]$Configuration = "Release",
+    [string]$PatchedIedDll = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,6 +11,9 @@ $BuildRoot = Join-Path $ProjectRoot "build"
 $PackageRoot = Join-Path $BuildRoot "package"
 $PluginRoot = Join-Path $PackageRoot "Data\SKSE\Plugins"
 $DistRoot = Join-Path $ProjectRoot "dist"
+$BundledPatchedIedDll = Join-Path $ProjectRoot "third-party\IED-1.7.4\ImmersiveEquipmentDisplays.dll"
+$IedLicenseSource = Join-Path $ProjectRoot "third-party\IED-LICENSE.txt"
+$IedLicenseDestination = Join-Path $PackageRoot "Data\IEDSyncTogether\licenses\IED-LICENSE.txt"
 
 if (-not $VcpkgRoot) {
     $VcpkgRoot = "C:\dev\vcpkg"
@@ -57,7 +61,7 @@ function Write-MinimalPlugin {
         }
 
         Write-Subrecord $dataWriter "CNAM" ([System.Text.Encoding]::UTF8.GetBytes("Caelvanost`0"))
-        Write-Subrecord $dataWriter "SNAM" ([System.Text.Encoding]::UTF8.GetBytes("IEDSyncTogether STRPM state transport marker`0"))
+        Write-Subrecord $dataWriter "SNAM" ([System.Text.Encoding]::UTF8.GetBytes("IEDSyncTogether STRPM proxy-isolation marker`0"))
 
         $file = [System.IO.File]::Open($Path, [System.IO.FileMode]::Create)
         $writer = [System.IO.BinaryWriter]::new($file)
@@ -81,6 +85,22 @@ function Write-MinimalPlugin {
     }
 }
 
+if (-not $PatchedIedDll) {
+    $PatchedIedDll = $BundledPatchedIedDll
+}
+if (-not (Test-Path -LiteralPath $PatchedIedDll -PathType Leaf)) {
+    throw @"
+ImmersiveEquipmentDisplays.dll 1.7.4 patche introuvable:
+$PatchedIedDll
+
+Recupere d'abord le dernier commit de feature/proxy-ied-isolation apres le workflow
+'Build patched IED 1.7.4', ou passe -PatchedIedDll <chemin>.
+"@
+}
+if (-not (Test-Path -LiteralPath $IedLicenseSource -PathType Leaf)) {
+    throw "Licence IED introuvable: $IedLicenseSource"
+}
+
 & cmake -S $ProjectRoot -B $BuildRoot "-DCMAKE_TOOLCHAIN_FILE=$Toolchain"
 if ($LASTEXITCODE -ne 0) { throw "La configuration CMake a echoue." }
 
@@ -96,7 +116,7 @@ if (Test-Path -LiteralPath $GeneratedPlugin) {
 & cmake --build $BuildRoot --config $Configuration
 if ($LASTEXITCODE -ne 0) { throw "La compilation a echoue." }
 
-$dll = Get-ChildItem -LiteralPath $BuildRoot -Recurse -Filter "IEDSyncTogether.dll" |
+$dll = Get-ChildItem -LiteralPath $BuildRoot -Recurse -Filter "IEDSyncTogether.dll" -File |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
 if (-not $dll) { throw "IEDSyncTogether.dll est introuvable apres compilation." }
@@ -107,7 +127,11 @@ if (Test-Path -LiteralPath $PackageRoot) {
 New-Item -ItemType Directory -Force -Path $PluginRoot, $DistRoot | Out-Null
 
 Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $PluginRoot "IEDSyncTogether.dll") -Force
+Copy-Item -LiteralPath $PatchedIedDll -Destination (Join-Path $PluginRoot "ImmersiveEquipmentDisplays.dll") -Force
 Write-MinimalPlugin (Join-Path $PackageRoot "Data\IEDSyncTogether.esp")
+
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $IedLicenseDestination) | Out-Null
+Copy-Item -LiteralPath $IedLicenseSource -Destination $IedLicenseDestination -Force
 
 $Archive = Join-Path $DistRoot "IEDSyncTogether-v$ProjectVersion.zip"
 if (Test-Path -LiteralPath $Archive) {
@@ -115,4 +139,23 @@ if (Test-Path -LiteralPath $Archive) {
 }
 Compress-Archive -Path (Join-Path $PackageRoot "*") -DestinationPath $Archive -Force
 
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zip = [System.IO.Compression.ZipFile]::OpenRead($Archive)
+try {
+    $entries = @($zip.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
+    foreach ($required in @(
+        "Data/SKSE/Plugins/IEDSyncTogether.dll",
+        "Data/SKSE/Plugins/ImmersiveEquipmentDisplays.dll",
+        "Data/IEDSyncTogether.esp",
+        "Data/IEDSyncTogether/licenses/IED-LICENSE.txt"
+    )) {
+        if ($entries -notcontains $required) {
+            throw "Entree absente de l'archive: $required"
+        }
+    }
+} finally {
+    $zip.Dispose()
+}
+
 Write-Host "Package cree: $Archive" -ForegroundColor Green
+Write-Host "Inclut ImmersiveEquipmentDisplays.dll 1.7.4 patche pour isoler les proxies STR." -ForegroundColor Green
