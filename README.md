@@ -2,38 +2,62 @@
 
 Compatibility layer between Immersive Equipment Displays (IED) and Skyrim Together Reborn.
 
-## v0.9.1 — AnimSync ownership split for Helmet Toggle animation objects
+## v0.10.0 — automatic IED isolation for STR proxies
 
-IEDSyncTogether reproduces standard IED slot displays and persistent captured IED Custom Items on the correct remote STR proxy while preserving exact scenegraph transforms.
+v0.10.0 removes the need to disable **IED NPC Displays** globally during multiplayer.
 
-v0.9.1 fixes an interaction with AnimSyncTogether's Helmet Toggle / GPMA replay: when `AnimSyncTogether.dll` is loaded, transient Custom Items attached to `AnimObjectR` or `AnimObjectL` are no longer recreated by IEDSyncTogether. Those animation objects are owned by AnimSync/OAR instead. Persistent displays such as a helmet at `ExtraPelvisArmorHelmet1` remain synchronized by IEDSyncTogether.
+IED can remain fully enabled for ordinary NPCs. Only actors identified by STRPluginMessagingAPI's ProxyResolver as remote STR player proxies are isolated from IED's normal NPC display pipeline. Those proxies then display only the equipment state reproduced by IEDSyncTogether.
 
 ```text
-local evaluated IED state
-        ↓
-slots + persistent custom objects
-        ↓
-plugin/local FormID + attachment mode + exact local transform
-        ↓
-LocalIEDState / STRPM
-        ↓
-STRPM ProxyResolver
-        ↓
+ordinary NPC
+   ↓
+normal IED NPC Displays + normal IED Custom Items
+
 remote STR proxy
-        ↓
-IED creates/attaches IEDSyncTogether-owned Custom Items
-        ↓
-IEDSyncTogether watchdog maintains exact NiAVObject::local transforms
+   ↓
+patched IED bridge detects proxy FormID
+   ↓
+normal IED slot display = suppressed
+non-IEDSync Custom Items = suppressed / purged
+   ↓
+IEDSyncTogether.esp-owned Custom Items only
+   ↓
+remote sender state + exact transform watchdog
 ```
+
+This feature builds on v0.9.1, including the AnimSyncTogether ownership split for transient `AnimObjectR` / `AnimObjectL` Helmet Toggle animation objects.
 
 ### Requirements
 
 - Skyrim Together Reborn 1.8.0
-- Immersive Equipment Displays
+- Immersive Equipment Displays **1.7.4**
 - STRPluginMessagingAPI v0.8.2 or newer compatible build with ProxyResolver available
 - the relay/server files required by that STRPM build
 
-For renderer testing, disabling IED **NPC Displays** on both clients makes it easier to distinguish normal IED NPC displays from IEDSyncTogether-owned remote displays.
+The v0.10.0 test archive includes an IED 1.7.4 compatibility DLL built reproducibly from the official IED 1.7.4 source plus the small IEDSyncTogether bridge patch. It replaces `ImmersiveEquipmentDisplays.dll` while preserving normal IED behavior for non-proxy actors.
+
+IED is MIT licensed; the upstream license is included in `Data/IEDSyncTogether/licenses/IED-LICENSE.txt`.
+
+## Proxy isolation bridge
+
+IEDSyncTogether keeps a small thread-safe set of active remote proxy FormIDs. STRPM ProxyResolver mapping callbacks update that set as proxies are added, replaced, removed or cleared.
+
+The patched IED 1.7.4 DLL queries two public exports from `IEDSyncTogether.dll`:
+
+```text
+IEDST_QuerySlotOverride(actorFormID, slotIndex, outFormID)
+IEDST_IsRemoteProxy(actorFormID)
+```
+
+For a normal NPC, the bridge does nothing.
+
+For a remote STR proxy:
+
+- all 19 normal IED equipment slots return an empty selection;
+- IED's actor/NPC/race/global Custom Item maps are filtered so only the plugin key `IEDSyncTogether.esp` is processed;
+- any non-IEDSync Custom Items that were already created before the STR mapping became known are removed through IED's normal object cleanup path.
+
+This avoids `AddActorBlock`, which is too broad because it removes both standard gear and the IEDSyncTogether-owned Custom Items needed by the renderer. It also avoids the old private runtime detours used by early experimental versions.
 
 ## Local capture
 
@@ -61,18 +85,18 @@ strpm.iedsynctogether.state.v1
 
 using reliable + ordered STRPM messages.
 
-The resilient delivery behavior remains active:
+Delivery behavior:
 
 - changed state is retained as pending while transport is unavailable;
 - pending state retries every 1 second;
 - the current full state is retransmitted every 10 seconds as a heartbeat;
 - late-joining peers receive the current state without forcing an equipment change.
 
-IEDSyncTogether uses STRPM's public ProxyResolver API only. It does not scan `ProcessLists`, compare actor names, or guess dynamic proxy FormIDs. Proxy mapping callbacks are forwarded to the SKSE game-task queue before actor lookup or IED rendering.
+IEDSyncTogether uses STRPM's public ProxyResolver API. It does not scan `ProcessLists`, compare actor names, or guess dynamic proxy FormIDs.
 
-## Standard slot renderer
+## Remote renderer
 
-Standard favorites continue to use the raw-scenegraph renderer:
+Standard slots are recreated as actor-specific IED Custom Items owned by `IEDSyncTogether.esp`:
 
 1. resolve `plugin + local FormID` on the receiving client;
 2. select the evaluated remote node/anchor;
@@ -82,26 +106,13 @@ Standard favorites continue to use the raw-scenegraph renderer:
 6. find the generated `OBJECT ... [FormID]` scene object;
 7. restore its exact captured local position, raw 3x3 matrix and scale directly.
 
-This is the path used for synchronized weapons, bows, shields and other standard favorites.
+Persistent captured Custom Items follow the same ownership model.
 
 ## Persistent transform watchdog
 
-IED may re-evaluate an entry after it has been created and temporarily restore its own default transform. IEDSyncTogether therefore maintains tracked remote displays with a local watchdog:
+Every 100 ms, the local watchdog checks the exact scenegraph transform of IEDSyncTogether-owned remote displays. If IED later re-evaluates an item and changes its transform, IEDSyncTogether restores the captured matrix, position and scale on the game thread.
 
-```text
-100 ms tick
-   ↓
-for every tracked remote IEDSyncTogether display
-   ↓
-measure rotation / position / scale delta
-   ↓
-if already correct: do nothing
-if changed by IED: restore exact raw transform immediately
-```
-
-The watchdog generates no network traffic. It only reads and, when needed, repairs IEDSyncTogether-owned remote scene objects on the Skyrim game thread.
-
-Expected correction logs:
+Expected logs:
 
 ```text
 REMOTE IED WATCHDOG acquired: ...
@@ -109,29 +120,11 @@ REMOTE IED WATCHDOG corrected: ...
 REMOTE IED WATCHDOG recorrected: ...
 ```
 
-## Custom Item renderer
+The watchdog creates no network traffic.
 
-Persistent visible `IEDObjectKind::kCustom` objects are rendered remotely. The captured IED attachment mode is preserved directly from the scene graph:
+## Helmet Toggle / AnimSyncTogether ownership
 
-```text
-OBJECT P <node>  → parent attachment mode
-OBJECT R <node>  → reference attachment mode
-```
-
-The transmitted form is resolved locally and the same raw scenegraph transform is maintained through the watchdog.
-
-### Helmet Toggle / AnimSyncTogether ownership
-
-AnimSyncTogether v0.11.x replays Helmet Toggle's GPMA graph state and `OffsetGPMA` / `OffsetGPMAStop` events on the remote STR proxy. OAR can therefore create the transient animation object itself.
-
-Without an ownership split, both systems could render the same helmet during the animation:
-
-```text
-AnimSync + OAR → animation helmet on AnimObjectR
-IEDSyncTogether → duplicate IED Custom Item on AnimObjectR
-```
-
-v0.9.1 prevents that duplication. When `AnimSyncTogether.dll` is loaded, remote decode filters transient Custom Items attached to:
+When `AnimSyncTogether.dll` is loaded, transient Custom Items attached to:
 
 ```text
 OBJECT P AnimObjectR
@@ -140,28 +133,20 @@ OBJECT P AnimObjectL
 OBJECT R AnimObjectL
 ```
 
-These objects are delegated to AnimSync/OAR.
+are delegated to AnimSync/OAR and are not recreated by IEDSyncTogether.
 
-Persistent IED displays are not filtered. For example, a helmet at the waist remains synchronized normally:
+Persistent displays such as:
 
 ```text
 OBJECT R ExtraPelvisArmorHelmet1
 ```
 
-This gives the intended ownership model:
+remain synchronized by IEDSyncTogether.
+
+Expected delegation log:
 
 ```text
-helmet animation in hand → AnimSync/OAR
-persistent helmet at waist → IEDSyncTogether
-helmet back on head / absent custom → no remote IEDSync custom helmet
-```
-
-If AnimSyncTogether is not loaded, IEDSyncTogether keeps its previous behavior and can still reproduce `AnimObjectR/L` Custom Items itself.
-
-A delegated object is visible in the log as:
-
-```text
-REMOTE IED CUSTOM delegated to AnimSync/OAR: ... attachment="OBJECT P AnimObjectR" ...
+REMOTE IED CUSTOM delegated to AnimSync/OAR: ...
 ```
 
 ## Diagnostic logs
@@ -169,59 +154,81 @@ REMOTE IED CUSTOM delegated to AnimSync/OAR: ... attachment="OBJECT P AnimObject
 Startup should include:
 
 ```text
-IEDSyncTogether v0.9.1 loading
+IEDSyncTogether v0.10.0 loading
 REMOTE IED transform watchdog started: interval=100ms
+STRPM branch mode: ... patched-IED proxy isolation ...
 ```
 
-For a standard slot:
+When STRPM resolves another player:
 
 ```text
-REMOTE IED SLOT queued: ... rawTransform=watchdog
+IED bridge proxy registered: connection=... proxy=... tracked=...
 ```
 
-For a persistent Custom Item:
+Normal renderer markers remain:
 
 ```text
-REMOTE IED CUSTOM queued: ... attachmentMode=parent|reference ... rawTransform=watchdog
-```
-
-For a transient animation object delegated to AnimSync:
-
-```text
-REMOTE IED CUSTOM delegated to AnimSync/OAR: ...
+REMOTE IED SLOT queued: ...
+REMOTE IED CUSTOM queued: ...
+REMOTE IED RENDER queued: ...
 ```
 
 ## Build
+
+The core plugin still builds with:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build-vortex.ps1
 ```
 
+For v0.10.0, `build-vortex.ps1` also requires the patched IED 1.7.4 DLL at:
+
+```text
+third-party/IED-1.7.4/ImmersiveEquipmentDisplays.dll
+```
+
+The `Build patched IED 1.7.4` GitHub workflow builds that DLL from the pinned official IED 1.7.4 source and commits the reproducible test binary to `feature/proxy-ied-isolation`.
+
 Expected archive:
 
 ```text
-dist/IEDSyncTogether-v0.9.1.zip
+dist/IEDSyncTogether-v0.10.0.zip
 ```
 
-## v0.9.1 test protocol
+The archive contains:
 
-Install IEDSyncTogether v0.9.1 and AnimSyncTogether v0.11.1 on both clients.
+```text
+Data/SKSE/Plugins/IEDSyncTogether.dll
+Data/SKSE/Plugins/ImmersiveEquipmentDisplays.dll
+Data/IEDSyncTogether.esp
+Data/IEDSyncTogether/licenses/IED-LICENSE.txt
+```
 
-1. Keep the same Helmet Toggle / DAV configuration on both clients.
-2. Connect both players to the same STR server.
-3. Trigger the helmet removal animation.
-4. Verify there is only one helmet in the hand during the animation.
-5. Verify the log contains `REMOTE IED CUSTOM delegated to AnimSync/OAR` for `AnimObjectR`/`AnimObjectL`.
-6. Verify the helmet appears once at `ExtraPelvisArmorHelmet1` after the animation when the local state places it at the waist.
-7. Trigger the helmet equip animation again.
-8. Verify the waist display disappears and no helmet remains at the waist once the helmet is back on the head.
-9. Verify normal weapon/favorite synchronization and watchdog corrections still behave as before.
-10. Send both IEDSyncTogether and AnimSyncTogether logs if any duplicate or stale helmet remains.
+No legacy IEDSyncTogether INI or UDP transport files are included.
+
+## v0.10.0 test protocol
+
+Install the same v0.10.0 archive on both clients and **leave IED NPC Displays enabled on both clients**.
+
+1. Before connecting to STR, verify ordinary NPCs still show their normal IED displays.
+2. Connect Player1 and Player2 to the same STR server.
+3. Verify the remote player proxy does not retain any automatic NPC Display copy of weapons, bows, shields or other IED slots.
+4. Verify the proxy shows one copy of each display reproduced by IEDSyncTogether and that its placement/orientation matches the sender.
+5. Verify ordinary NPCs nearby continue to use normal IED NPC Displays while the remote player is isolated.
+6. Test a persistent IED Custom Item such as the Helmet Toggle waist display and verify only the IEDSyncTogether copy remains on the proxy.
+7. With AnimSyncTogether installed, test the helmet hand animation and verify `AnimObjectR/L` remains delegated with no duplicate IEDSyncTogether copy.
+8. Disconnect/reconnect STR and verify proxy isolation is removed/reapplied with the proxy mapping lifecycle.
+9. Change cell or reload a save and verify no stale automatic NPC displays remain on a recreated proxy.
+10. Send both `IEDSyncTogether.log` files if a proxy shows an extra automatic IED object or a normal NPC loses its displays.
 
 ## Safety
 
-IED remains responsible for creation, attachment, enable/disable and cleanup through its public Papyrus Custom Item API. IEDSyncTogether only updates the local transform of the specific scene objects it created for remote synchronization. No private IED detours are used.
+The proxy registry contains only FormIDs provided by STRPM ProxyResolver. Normal NPCs are never classified by name, base FormID or heuristic.
+
+The IED compatibility change is a small compile-time bridge against the official IED 1.7.4 source. No private IED runtime detours are installed by IEDSyncTogether. IED remains responsible for object creation and cleanup; IEDSyncTogether owns only its `IEDSyncTogether.esp` Custom Items and directly corrects their final scenegraph transforms.
 
 ## License
 
-MIT
+IEDSyncTogether: MIT.
+
+Immersive Equipment Displays compatibility DLL: upstream IED MIT license included in the package.
