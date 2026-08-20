@@ -40,7 +40,7 @@ namespace
                 });
             capture.Start();
             SKSE::log::info(
-                "STRPM branch mode: local capture + STRPM transport + ProxyResolver + raw-scenegraph slot/custom renderer + transform watchdog; transportReady={}",
+                "STRPM branch mode: local capture + STRPM transport + ProxyResolver + raw-scenegraph slot/custom renderer + transform watchdog + proxy NPC-display isolation; transportReady={}",
                 transportReady ? 1 : 0);
             break;
         }
