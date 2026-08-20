@@ -41,6 +41,7 @@ namespace IEDSyncTogether
             STRPM::ConnectionID connectionID{ 0 };
             std::string displayName;
             std::vector<TrackedRemoteObject> objects;
+            std::vector<RE::NiPointer<RE::NiAVObject>> suppressedNodes;
         };
 
         RemoteIEDRenderer() = default;
