@@ -1,14 +1,13 @@
 diff --git a/ImmersiveEquipmentDisplays/IED/Controller/IEquipment.cpp b/ImmersiveEquipmentDisplays/IED/Controller/IEquipment.cpp
 --- a/ImmersiveEquipmentDisplays/IED/Controller/IEquipment.cpp
 +++ b/ImmersiveEquipmentDisplays/IED/Controller/IEquipment.cpp
-@@ -4,6 +4,7 @@
+@@ -4,5 +4,6 @@
  
  #include "ActorObjectHolder.h"
  #include "BipedSlotData.h"
 +#include "IEDSyncTogetherBridge.h"
  #include "IRNG.h"
  
- #include "IED/Controller/Controller.h"
 @@ -45,6 +46,30 @@ namespace IED
  		const ObjectEntrySlot&    a_slot) noexcept
  		-> SelectedItem
