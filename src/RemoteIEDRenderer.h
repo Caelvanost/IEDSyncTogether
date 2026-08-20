@@ -11,6 +11,8 @@ namespace IEDSyncTogether
     public:
         static RemoteIEDRenderer& GetSingleton();
 
+        void Start();
+
         bool Apply(
             STRPM::ConnectionID connectionID,
             STRPM::ProxyFormID proxyFormID,
@@ -22,8 +24,34 @@ namespace IEDSyncTogether
         void Reset();
 
     private:
+        struct TrackedRemoteObject
+        {
+            std::string itemName;
+            std::string kind;
+            std::optional<std::size_t> slot;
+            RE::FormID remoteFormID{ 0 };
+            std::string expectedAttachment;
+            CapturedIEDObject object;
+            bool acquired{ false };
+            std::uint32_t corrections{ 0 };
+        };
+
+        struct TrackedProxyState
+        {
+            STRPM::ConnectionID connectionID{ 0 };
+            std::string displayName;
+            std::vector<TrackedRemoteObject> objects;
+        };
+
         RemoteIEDRenderer() = default;
 
+        void WatchdogLoop(std::stop_token stopToken);
+        void ScheduleWatchdogTick();
+        void WatchdogTick();
+
         std::unordered_map<STRPM::ProxyFormID, std::string> _appliedSignatures;
+        std::unordered_map<STRPM::ProxyFormID, TrackedProxyState> _trackedProxies;
+        std::jthread _watchdogThread;
+        std::atomic_bool _watchdogTaskQueued{ false };
     };
 }
