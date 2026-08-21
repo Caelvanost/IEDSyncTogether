@@ -1,0 +1,67 @@
+name: Apply v0.10.1 AnimObject isolation exemption
+
+on:
+  push:
+    branches:
+      - dev/autonomous-proxy-renderer
+    paths:
+      - .github/workflows/apply-v0101.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev/autonomous-proxy-renderer
+          fetch-depth: 0
+
+      - name: Apply v0.10.1 patch
+        shell: python
+        run: |
+          from pathlib import Path
+
+          cpp_path = Path('src/RemoteIEDRenderer.cpp')
+          cpp = cpp_path.read_text(encoding='utf-8')
+
+          needle = '''            return value ? std::optional<RE::FormID>(value) : std::nullopt;\n        }\n\n        struct SceneIEDObject\n'''
+          replacement = '''            return value ? std::optional<RE::FormID>(value) : std::nullopt;\n        }\n\n        bool IsAnimSyncLoaded() noexcept\n        {\n            return GetModuleHandleW(L"AnimSyncTogether.dll") != nullptr;\n        }\n\n        bool IsAnimSyncTransientAttachment(std::string_view parentName) noexcept\n        {\n            if (!IsAnimSyncLoaded()) {\n                return false;\n            }\n\n            return parentName == "OBJECT P AnimObjectR" ||\n                parentName == "OBJECT R AnimObjectR" ||\n                parentName == "OBJECT P AnimObjectL" ||\n                parentName == "OBJECT R AnimObjectL";\n        }\n\n        struct SceneIEDObject\n'''
+          if needle not in cpp:
+              raise SystemExit('Could not find ParseIEDObjectFormID insertion point')
+          cpp = cpp.replace(needle, replacement, 1)
+
+          needle = '''                auto* object = sceneObjects[index].object;\n                if (!object) {\n                    continue;\n                }\n\n                const bool alreadySuppressed = std::ranges::any_of(\n'''
+          replacement = '''                auto* object = sceneObjects[index].object;\n                if (!object) {\n                    continue;\n                }\n\n                if (IsAnimSyncTransientAttachment(sceneObjects[index].parentName)) {\n                    const bool suppressedByIEDSync = std::ranges::any_of(\n                        proxyState.suppressedNodes,\n                        [object](const RE::NiPointer<RE::NiAVObject>& suppressed) {\n                            return suppressed && suppressed.get() == object;\n                        });\n\n                    if (suppressedByIEDSync) {\n                        forgetSuppressed(object);\n                        object->SetAppCulled(false);\n                        SKSE::log::info(\n                            "REMOTE IED ISOLATION restored AnimSync transient: connection={} name=\\\"{}\\\" proxy={:08X} remoteForm={:08X} parent=\\\"{}\\\" object=\\\"{}\\\" reason=AnimSync-owns-AnimObject",\n                            proxyState.connectionID,\n                            proxyState.displayName,\n                            proxyFormID,\n                            sceneObjects[index].formID,\n                            sceneObjects[index].parentName,\n                            sceneObjects[index].objectName);\n                    }\n                    continue;\n                }\n\n                const bool alreadySuppressed = std::ranges::any_of(\n'''
+          if needle not in cpp:
+              raise SystemExit('Could not find isolation suppression insertion point')
+          cpp = cpp.replace(needle, replacement, 1)
+          cpp_path.write_text(cpp, encoding='utf-8')
+
+          cmake_path = Path('CMakeLists.txt')
+          cmake = cmake_path.read_text(encoding='utf-8')
+          if 'VERSION 0.10.0' not in cmake:
+              raise SystemExit('Expected VERSION 0.10.0 not found')
+          cmake_path.write_text(cmake.replace('VERSION 0.10.0', 'VERSION 0.10.1', 1), encoding='utf-8')
+
+          readme_path = Path('README.md')
+          readme = readme_path.read_text(encoding='utf-8')
+          readme = readme.replace('v0.10.0', 'v0.10.1')
+          marker = '## v0.10.1'
+          if marker in readme and 'AnimObjectR/L isolation exemption' not in readme:
+              readme = readme.replace(
+                  marker,
+                  marker + '\n\n### v0.10.1 fix — AnimObjectR/L isolation exemption\n\nWhen `AnimSyncTogether.dll` is loaded, the NPC Display isolation watchdog now leaves `OBJECT P/R AnimObjectR` and `OBJECT P/R AnimObjectL` untouched. These transient animation attachments are owned by AnimSync/OAR, so helmet props remain visible in hand during Helmet Toggle animations while persistent waist displays continue to be synchronized by IEDSyncTogether.\n',
+                  1)
+          readme_path.write_text(readme, encoding='utf-8')
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/RemoteIEDRenderer.cpp CMakeLists.txt README.md
+          git commit -m "Fix AnimSync transient isolation in v0.10.1"
+          git push origin HEAD:dev/autonomous-proxy-renderer
