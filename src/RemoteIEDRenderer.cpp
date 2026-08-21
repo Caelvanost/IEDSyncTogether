@@ -170,6 +170,23 @@ namespace IEDSyncTogether
             return value ? std::optional<RE::FormID>(value) : std::nullopt;
         }
 
+        bool IsAnimSyncLoaded() noexcept
+        {
+            return GetModuleHandleW(L"AnimSyncTogether.dll") != nullptr;
+        }
+
+        bool IsAnimSyncTransientAttachment(std::string_view parentName) noexcept
+        {
+            if (!IsAnimSyncLoaded()) {
+                return false;
+            }
+
+            return parentName == "OBJECT P AnimObjectR" ||
+                parentName == "OBJECT R AnimObjectR" ||
+                parentName == "OBJECT P AnimObjectL" ||
+                parentName == "OBJECT R AnimObjectL";
+        }
+
         struct SceneIEDObject
         {
             RE::NiAVObject* object{ nullptr };
@@ -545,6 +562,28 @@ namespace IEDSyncTogether
 
                 auto* object = sceneObjects[index].object;
                 if (!object) {
+                    continue;
+                }
+
+                if (IsAnimSyncTransientAttachment(sceneObjects[index].parentName)) {
+                    const bool suppressedByIEDSync = std::ranges::any_of(
+                        proxyState.suppressedNodes,
+                        [object](const RE::NiPointer<RE::NiAVObject>& suppressed) {
+                            return suppressed && suppressed.get() == object;
+                        });
+
+                    if (suppressedByIEDSync) {
+                        forgetSuppressed(object);
+                        object->SetAppCulled(false);
+                        SKSE::log::info(
+                            "REMOTE IED ISOLATION restored AnimSync transient: connection={} name=\"{}\" proxy={:08X} remoteForm={:08X} parent=\"{}\" object=\"{}\" reason=AnimSync-owns-AnimObject",
+                            proxyState.connectionID,
+                            proxyState.displayName,
+                            proxyFormID,
+                            sceneObjects[index].formID,
+                            sceneObjects[index].parentName,
+                            sceneObjects[index].objectName);
+                    }
                     continue;
                 }
 

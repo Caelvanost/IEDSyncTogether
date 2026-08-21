@@ -2,7 +2,12 @@
 
 Compatibility layer between Immersive Equipment Displays (IED) and Skyrim Together Reborn.
 
-## v0.10.0-dev — proxy NPC Display isolation
+## v0.10.1
+
+### v0.10.1 fix — AnimObjectR/L isolation exemption
+
+When `AnimSyncTogether.dll` is loaded, the NPC Display isolation watchdog now leaves `OBJECT P/R AnimObjectR` and `OBJECT P/R AnimObjectL` untouched. These transient animation attachments are owned by AnimSync/OAR, so helmet props remain visible in hand during Helmet Toggle animations while persistent waist displays continue to be synchronized by IEDSyncTogether.
+-dev — proxy NPC Display isolation
 
 This development branch builds on v0.9.1 and removes the need to disable IED **NPC Displays** globally during multiplayer.
 
@@ -94,7 +99,7 @@ No private IED runtime hooks are used.
 
 With NPC Displays enabled, IED can independently create equipment displays for the STR proxy because STR proxies look like normal NPCs to IED.
 
-v0.10.0-dev handles that at the scenegraph level rather than changing IED.
+v0.10.1-dev handles that at the scenegraph level rather than changing IED.
 
 On every 100 ms watchdog tick, IEDSyncTogether inventories all proxy nodes whose object name follows IED's loaded-object form:
 
@@ -198,12 +203,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build-vortex.ps1
 Expected archive:
 
 ```text
-dist/IEDSyncTogether-v0.10.0.zip
+dist/IEDSyncTogether-v0.10.1.zip
 ```
 
 The package contains the IEDSyncTogether plugin only. It does **not** contain `ImmersiveEquipmentDisplays.dll`.
 
-## v0.10.0-dev test protocol
+## v0.10.1-dev test protocol
 
 Install this build on both clients and use the normal stock IED installation on both machines.
 
@@ -222,7 +227,7 @@ Install this build on both clients and use the normal stock IED installation on 
 Useful log markers:
 
 ```text
-IEDSyncTogether v0.10.0 loading
+IEDSyncTogether v0.10.1 loading
 REMOTE IED transform/isolation watchdog started: interval=100ms
 REMOTE IED ISOLATION suppressed: ...
 REMOTE IED RENDER queued: ... npcDisplayIsolation=1
