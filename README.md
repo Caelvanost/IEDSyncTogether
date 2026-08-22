@@ -2,18 +2,37 @@
 
 Compatibility layer between Immersive Equipment Displays (IED) and Skyrim Together Reborn.
 
-## v0.10.1
+## v0.10.2
 
-### v0.10.1 fix — AnimObjectR/L isolation exemption
+### v0.10.2 fix — transient AnimObject visual ownership restored to IEDSyncTogether
 
-When `AnimSyncTogether.dll` is loaded, the NPC Display isolation watchdog now leaves `OBJECT P/R AnimObjectR` and `OBJECT P/R AnimObjectL` untouched. These transient animation attachments are owned by AnimSync/OAR, so helmet props remain visible in hand during Helmet Toggle animations while persistent waist displays continue to be synchronized by IEDSyncTogether.
--dev — proxy NPC Display isolation
+AnimSyncTogether continues to own and replay the Helmet Toggle / GPMA animation state, but IEDSyncTogether now once again renders the transient visual Custom Item attached to `AnimObjectR` / `AnimObjectL` when that object exists in the authoritative remote IED state.
 
-This development branch builds on v0.9.1 and removes the need to disable IED **NPC Displays** globally during multiplayer.
+This fixes a case where the remote proxy correctly played the helmet removal animation but showed an empty hand because OAR replayed the animation without creating the IED armor display itself.
+
+The v0.10.1 scenegraph isolation exemption remains active: when `AnimSyncTogether.dll` is loaded, `OBJECT P/R AnimObjectR` and `OBJECT P/R AnimObjectL` are never treated as unwanted NPC Display objects by the isolation watchdog.
+
+The ownership model is now:
+
+```text
+Helmet Toggle / GPMA animation events
+   → AnimSyncTogether / OAR
+
+Transient helmet visual on AnimObjectR/L
+   → IEDSyncTogether
+
+Persistent waist helmet display
+   → IEDSyncTogether
+
+Unwanted proxy NPC Displays
+   → suppressed by IEDSyncTogether isolation watchdog
+```
+
+This development branch removes the need to disable IED **NPC Displays** globally during multiplayer.
 
 IED itself remains completely stock. IEDSyncTogether does not patch, replace or detour `ImmersiveEquipmentDisplays.dll`.
 
-The intended ownership model is now:
+The intended proxy flow is:
 
 ```text
 normal NPC
@@ -82,7 +101,7 @@ IEDSyncTogether uses STRPM's public ProxyResolver API. It does not scan `Process
 
 ## Remote renderer
 
-Standard favorites and persistent Custom Items are still created through IED's public Papyrus Custom Item API:
+Standard favorites, persistent Custom Items and transient `AnimObjectR/L` visual items are created through IED's public Papyrus Custom Item API:
 
 1. resolve `plugin + local FormID` on the receiving client;
 2. select the captured remote node/attachment;
@@ -99,7 +118,7 @@ No private IED runtime hooks are used.
 
 With NPC Displays enabled, IED can independently create equipment displays for the STR proxy because STR proxies look like normal NPCs to IED.
 
-v0.10.1-dev handles that at the scenegraph level rather than changing IED.
+v0.10.x handles that at the scenegraph level rather than changing IED.
 
 On every 100 ms watchdog tick, IEDSyncTogether inventories all proxy nodes whose object name follows IED's loaded-object form:
 
@@ -111,21 +130,16 @@ For every object in the received remote state, the watchdog searches for candida
 
 The selected instance is kept visible and corrected. Every remaining IED object on that STR proxy is application-culled.
 
-This handles both unwanted NPC Displays and duplicates:
+When AnimSyncTogether is loaded, transient objects attached to:
 
 ```text
-remote state expects sword A on WeaponSword
-
-proxy scenegraph before isolation
-   sword A from normal NPC Displays
-   sword A from IEDSyncTogether
-   dagger B from local NPC Display evaluation
-
-proxy scenegraph after isolation
-   one sword A kept visible and aligned to the remote player
-   duplicate sword A hidden
-   dagger B hidden
+OBJECT P AnimObjectR
+OBJECT R AnimObjectR
+OBJECT P AnimObjectL
+OBJECT R AnimObjectL
 ```
+
+are exempt from unwanted-display isolation so the visual object rendered by IEDSyncTogether remains visible throughout the GPMA animation.
 
 The isolation applies only to proxies already tracked by IEDSyncTogether. Ordinary NPCs are never traversed or modified by this system.
 
@@ -171,18 +185,9 @@ REMOTE IED WATCHDOG recorrected: ...
 
 ## Helmet Toggle / AnimSyncTogether ownership
 
-The v0.9.1 ownership split is retained.
+AnimSyncTogether owns the remote animation state and GPMA event replay.
 
-When `AnimSyncTogether.dll` is loaded, transient Custom Items attached to:
-
-```text
-OBJECT P AnimObjectR
-OBJECT R AnimObjectR
-OBJECT P AnimObjectL
-OBJECT R AnimObjectL
-```
-
-are delegated to AnimSync/OAR instead of being recreated by IEDSyncTogether.
+IEDSyncTogether owns the actual IED visual Custom Item when the authoritative remote scene contains a transient object attached to `AnimObjectR` or `AnimObjectL`.
 
 Persistent displays such as:
 
@@ -190,9 +195,20 @@ Persistent displays such as:
 OBJECT R ExtraPelvisArmorHelmet1
 ```
 
-remain synchronized by IEDSyncTogether.
+remain synchronized by IEDSyncTogether as before.
 
-The scenegraph isolation only targets IED `OBJECT ... [FormID]` display objects. It does not target the GPMA/OAR animation object itself.
+This avoids both failure modes:
+
+```text
+old full delegation
+→ animation replayed remotely
+→ no remote helmet visual in hand
+
+v0.10.2 split ownership
+→ AnimSync plays the animation
+→ IEDSync renders the captured transient helmet visual
+→ isolation watchdog leaves AnimObjectR/L untouched
+```
 
 ## Build
 
@@ -203,34 +219,41 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build-vortex.ps1
 Expected archive:
 
 ```text
-dist/IEDSyncTogether-v0.10.1.zip
+dist/IEDSyncTogether-v0.10.2.zip
 ```
 
 The package contains the IEDSyncTogether plugin only. It does **not** contain `ImmersiveEquipmentDisplays.dll`.
 
-## v0.10.1-dev test protocol
+## v0.10.2 test protocol
 
 Install this build on both clients and use the normal stock IED installation on both machines.
 
 1. Enable **NPC Displays** in IED on both clients.
-2. Before connecting to STR, verify that normal NPCs still show their normal IED equipment displays.
+2. Verify normal NPCs still show their normal IED equipment displays.
 3. Connect both players to the same STR server.
-4. Verify the remote STR proxy does not gain additional local NPC Display weapons/items that are absent from the remote player's IED state.
-5. Equip or favorite several weapon types and verify exactly one synchronized copy is visible remotely.
-6. Test sword, bow/quiver, shield and at least one left-hand weapon if available.
-7. Test Helmet Toggle removal and re-equip with AnimSyncTogether.
-8. Verify the transient hand helmet remains owned by AnimSync/OAR and is not suppressed as an IED duplicate.
-9. Verify a persistent waist helmet remains synchronized once when the remote state contains it.
-10. Change cell or reconnect and verify proxy isolation resumes once ProxyResolver remaps the actor.
-11. Disconnect and verify ordinary NPC displays still operate normally.
+4. Verify the remote STR proxy only shows authoritative synchronized favorites/custom displays.
+5. Trigger Helmet Toggle removal on Player1.
+6. Verify AnimSync replays the removal animation on Player2.
+7. Verify the helmet visual appears in the proxy hand on `AnimObjectR` during the animation.
+8. Verify the hand visual disappears when the transient state ends.
+9. Verify the persistent waist helmet appears once when the remote state moves it to `ExtraPelvisArmorHelmet1`.
+10. Trigger the equip animation and verify the same transient hand visual behavior in reverse.
+11. Verify no duplicate helmet remains in hand or at the waist afterward.
 
 Useful log markers:
 
 ```text
-IEDSyncTogether v0.10.1 loading
+IEDSyncTogether v0.10.2 loading
+REMOTE IED CUSTOM queued: ... AnimObjectR|AnimObjectL ...
 REMOTE IED transform/isolation watchdog started: interval=100ms
 REMOTE IED ISOLATION suppressed: ...
 REMOTE IED RENDER queued: ... npcDisplayIsolation=1
+```
+
+The old marker below should no longer appear for transient AnimObject custom items:
+
+```text
+REMOTE IED CUSTOM delegated to AnimSync/OAR
 ```
 
 ## Safety
